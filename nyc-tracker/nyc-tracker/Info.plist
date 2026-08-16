@@ -1,5 +1,22 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
-<dict/>
+<dict>
+	<!--
+	  Supabase connection settings.
+
+	  These are $(BUILD_SETTING) references, substituted by Xcode at build time
+	  from Config/Secrets.xcconfig (gitignored). Nothing sensitive lives in this
+	  file or in git; if the xcconfig isn't wired up, the values stay as the
+	  literal "$(...)" strings and SupabaseConfig traps at launch with an
+	  explanation rather than failing mysteriously later.
+
+	  SupabaseProjectHost is a HOST, not a URL, because .xcconfig treats "//" as
+	  a comment and would truncate "https://x.supabase.co" to "https:".
+	-->
+	<key>SupabaseProjectHost</key>
+	<string>$(SUPABASE_PROJECT_HOST)</string>
+	<key>SupabasePublishableKey</key>
+	<string>$(SUPABASE_PUBLISHABLE_KEY)</string>
+</dict>
 </plist>

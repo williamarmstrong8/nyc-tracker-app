@@ -1,0 +1,35 @@
+# ---- Secrets ---------------------------------------------------------------
+# The real config file. Never commit it — commit Secrets.example.xcconfig instead.
+# (The anon key is a public client key, but the file is the natural place a
+# service-role key would eventually get pasted by mistake, so it stays out.)
+**/Secrets.xcconfig
+.env
+.env.local
+supabase/.env
+
+# ---- Xcode -----------------------------------------------------------------
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+*.xccheckout
+build/
+DerivedData/
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Swift Package Manager
+.swiftpm/
+.build/
+Packages/
+Package.resolved.bak
+
+# ---- Supabase CLI ----------------------------------------------------------
+supabase/.branches
+supabase/.temp
+
+# ---- macOS -----------------------------------------------------------------
+.DS_Store
+Secrets.xcconfig

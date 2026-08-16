@@ -113,4 +113,5 @@ struct ContentView: View {
 #Preview {
     ContentView()
         .modelContainer(LocalStore.shared)
+        .environment(AuthManager())
 }

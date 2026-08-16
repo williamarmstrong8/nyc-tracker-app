@@ -2,17 +2,16 @@ import SwiftUI
 import SwiftData
 import Charts
 
-/// Stats dashboard over the user's logged visits. This is the "profile" for a single-user app —
-/// what you've been to, how often, and what patterns fall out. Auth/sign-in still lives at the
-/// bottom for the future sync layer.
+/// Stats dashboard over the user's logged visits. The stats are still derived from the local
+/// SwiftData rows — this task added auth, not sync — but the identity at the top is now the real
+/// signed-in profile rather than a mock.
 struct ProfileView: View {
     @Query(sort: [SortDescriptor(\Visit.visitedOn, order: .reverse)]) private var visits: [Visit]
+    @Environment(AuthManager.self) private var auth
 
     @State private var showSettings = false
 
-    // Mock identity — a real auth profile (name, handle, avatar) lands with the Supabase sync layer.
-    private let mockDisplayName = "Will Armstrong"
-    private let mockUsername = "@willxnyc"
+    private var profile: Profile? { auth.state.profile }
 
     var body: some View {
         NavigationStack {
@@ -66,18 +65,16 @@ struct ProfileView: View {
 
     private var identityHeader: some View {
         HStack(spacing: 16) {
-            Image("Logo")
-                .resizable()
-                .scaledToFill()
+            avatar
                 .frame(width: 68, height: 68)
                 .clipShape(Circle())
                 .overlay(Circle().stroke(Color(uiColor: .systemBackground), lineWidth: 3))
                 .shadow(color: .black.opacity(0.12), radius: 6, x: 0, y: 3)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 3) {
-                Text(mockDisplayName)
+                Text(profile?.bestName ?? "—")
                     .font(.title3.weight(.semibold))
-                Text(mockUsername)
+                Text(profile?.handle ?? "")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                 if let firstDate = stats.firstVisitedOn {
@@ -93,6 +90,21 @@ struct ProfileView: View {
             Spacer()
         }
         .padding(.vertical, 4)
+    }
+
+    /// Uploaded avatar when there is one, app logo as the fallback (also used
+    /// while the remote image loads, so the header never jumps).
+    @ViewBuilder
+    private var avatar: some View {
+        if let urlString = profile?.avatarURL, let url = URL(string: urlString) {
+            AsyncImage(url: url) { image in
+                image.resizable().scaledToFill()
+            } placeholder: {
+                Image("Logo").resizable().scaledToFill()
+            }
+        } else {
+            Image("Logo").resizable().scaledToFill()
+        }
     }
 
     /// One hero number, front and center — the single stat someone opening their profile cares
@@ -311,18 +323,16 @@ struct ProfileView: View {
         }
     }
 
+    /// The old "Sign in to sync" placeholder is gone — you can't reach this screen
+    /// without a session any more. What's left is the honest status: the account
+    /// exists, but visits still live only on this device until the sync layer lands.
     private var signInFooter: some View {
         VStack(spacing: 8) {
-            Button {
-                Haptics.tap()
-            } label: {
-                Label("Sign in to sync", systemImage: "arrow.right.circle.fill")
-                    .frame(maxWidth: .infinity, minHeight: 44)
-            }
-            .buttonStyle(.glass)
-            .disabled(true)
+            Label("Signed in", systemImage: "checkmark.seal.fill")
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(.secondary)
 
-            Text("Sign-in unlocks syncing and publishing in a later update.")
+            Text("Your places are stored on this device. Syncing and publishing arrive in a future update.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)

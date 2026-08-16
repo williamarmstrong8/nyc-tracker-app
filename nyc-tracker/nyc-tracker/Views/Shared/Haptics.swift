@@ -11,6 +11,11 @@ enum Haptics {
         generator.impactOccurred()
     }
 
+    static func warning() {
+        let generator = UINotificationFeedbackGenerator()
+        generator.notificationOccurred(.warning)
+    }
+
     static func soft() {
         let generator = UIImpactFeedbackGenerator(style: .soft)
         generator.impactOccurred()
