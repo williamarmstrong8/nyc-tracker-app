@@ -5,7 +5,10 @@ import PhotosUI
 /// Full-screen capture flow presented once the user has already picked photos from the library.
 /// Stages: details → processing → (venue picker) → write-up.
 struct CaptureFlowView: View {
+    let userID: UUID
+
     @Environment(\.modelContext) private var modelContext
+    @Environment(SyncEngine.self) private var sync
     @Bindable var coordinator: CaptureCoordinator
     let enricher: EnricherProtocol
     var onConfirmedVisit: (Visit) -> Void
@@ -32,9 +35,13 @@ struct CaptureFlowView: View {
                         coordinator: coordinator,
                         onConfirm: {
                             Task {
-                                let repository = VisitRepository(context: modelContext)
+                                let repository = VisitRepository(context: modelContext, userID: userID)
                                 let visit = await coordinator.confirm(using: repository)
                                 onConfirmedVisit(visit)
+                                // Confirm already returned and the map is showing
+                                // the new pin; this just wakes the queue. Nothing
+                                // above it awaited the network.
+                                sync.requestSync(reason: .newLocalWrite)
                             }
                         }
                     )

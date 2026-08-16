@@ -12,18 +12,56 @@ struct PhotoView: View {
         case uiImage(UIImage)
         case relativePath(String)
         case phAssetIdentifier(String)
+        /// An object in the `visit-photos` bucket, fetched through `PhotoCache`.
+        case remote(path: String)
 
         /// Build the best source for a persisted `Photo` row.
-        init(photo: Photo) {
+        ///
+        /// The order is a preference ranking, cheapest and most reliable first:
+        /// a local file needs no network, the photo library needs no network but
+        /// may have been deleted, and the remote object always works but costs a
+        /// round trip. After a reinstall only the last one is available, which is
+        /// the case this ordering exists to handle without special-casing it.
+        ///
+        /// `wantsThumbnail` picks the ~400px object for small renders (map
+        /// callouts, list rows). Fetching a 2048px image to draw it at 56pt is
+        /// the difference between a list that populates immediately after a
+        /// reinstall and one that trickles in over minutes.
+        init(photo: Photo, wantsThumbnail: Bool = false) {
             if let symbol = photo.sfSymbol {
                 self = .sfSymbol(symbol)
-            } else if let path = photo.relativePath {
-                self = .relativePath(path)
-            } else if let asset = photo.assetLocalIdentifier {
-                self = .phAssetIdentifier(asset)
-            } else {
-                self = .sfSymbol("photo")
+                return
             }
+
+            if wantsThumbnail, let thumb = photo.thumbRelativePath,
+               FileManager.default.fileExists(
+                   atPath: FileStorage.url(forRelativePath: thumb).path
+               ) {
+                self = .relativePath(thumb)
+                return
+            }
+
+            if let path = photo.relativePath,
+               FileManager.default.fileExists(
+                   atPath: FileStorage.url(forRelativePath: path).path
+               ) {
+                self = .relativePath(path)
+                return
+            }
+
+            if wantsThumbnail, let remoteThumb = photo.remoteThumbPath {
+                self = .remote(path: remoteThumb)
+                return
+            }
+            if let remote = photo.remoteStoragePath {
+                self = .remote(path: remote)
+                return
+            }
+            if let asset = photo.assetLocalIdentifier {
+                self = .phAssetIdentifier(asset)
+                return
+            }
+            self = .sfSymbol("photo")
         }
     }
 
@@ -37,7 +75,7 @@ struct PhotoView: View {
             switch source {
             case .sfSymbol(let name):
                 symbolPlaceholder(name: name)
-            case .pickerItem, .relativePath, .phAssetIdentifier:
+            case .pickerItem, .relativePath, .phAssetIdentifier, .remote:
                 if let loaded {
                     Image(uiImage: loaded)
                         .resizable()
@@ -70,6 +108,15 @@ struct PhotoView: View {
             }
         case .phAssetIdentifier(let id):
             self.loaded = await Self.loadFromPhotoLibrary(identifier: id)
+        case .remote(let path):
+            // Lazy by design: this runs when the view is about to draw, not
+            // during the pull. A fresh install therefore shows its map and list
+            // immediately and fills images in as they scroll into view.
+            if let url = await PhotoCache.shared.file(for: path),
+               let data = try? Data(contentsOf: url),
+               let image = UIImage(data: data) {
+                self.loaded = image
+            }
         default:
             break
         }

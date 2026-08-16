@@ -3,11 +3,15 @@ import SwiftUI
 import AVFoundation
 import Speech
 
-/// The result of a hold-to-record voice memo. Callers get both the finalized transcript and, if
-/// available, the URL to the on-disk audio file so it can be attached to the Visit.
+/// The result of a hold-to-record voice memo: the finalized transcript, and nothing else.
+///
+/// The audio file is deliberately not part of this type. It is deleted as soon as
+/// transcription finishes and there is no accessor that could hand it to a caller
+/// — the absence is the guarantee. `hadRecording` exists only so the UI can say
+/// "a voice note was taken" without implying the audio still exists somewhere.
 struct RecordingResult: Sendable {
     var transcript: String
-    var audioRelativePath: String?
+    var hadRecording: Bool = false
 }
 
 /// Protocol for a hold-to-record voice memo capture + on-device transcription.
@@ -52,14 +56,22 @@ final class SpeechRecorder: RecorderProtocol {
         }
     }
 
+    /// Ends recording, transcribes, then **deletes the audio file** before returning.
+    ///
+    /// The delete is in a `defer` so it happens on every exit path — including a
+    /// transcription that throws, one that returns nothing, and a cancelled task.
+    /// A recording of someone's dinner conversation should not outlive the
+    /// sentence it produced, and the previous version of this method kept it
+    /// forever: it returned the relative path, `Visit.audioRelativePath` stored
+    /// it, and the M4A sat in `Application Support/NYCLog/Audio` — a directory
+    /// that is backed up to iCloud by default — until the visit was deleted.
     func stop() async -> RecordingResult {
-        guard isRecording else { return RecordingResult(transcript: "", audioRelativePath: nil) }
+        guard isRecording else { return RecordingResult(transcript: "") }
         isRecording = false
         timerTask?.cancel()
         timerTask = nil
         recorder?.stop()
         let capturedURL = audioURL
-        let capturedRelative = audioRelativePath
         recorder = nil
         audioURL = nil
         audioRelativePath = nil
@@ -69,10 +81,13 @@ final class SpeechRecorder: RecorderProtocol {
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
 
         guard let url = capturedURL, FileManager.default.fileExists(atPath: url.path) else {
-            return RecordingResult(transcript: "", audioRelativePath: nil)
+            return RecordingResult(transcript: "")
         }
+
+        defer { FileStorage.shred(at: url) }
+
         let transcript = await Self.transcribe(fileAt: url)
-        return RecordingResult(transcript: transcript, audioRelativePath: capturedRelative)
+        return RecordingResult(transcript: transcript, hadRecording: true)
     }
 
     // MARK: - Session setup
@@ -252,14 +267,14 @@ final class StubRecorder: RecorderProtocol {
     }
 
     func stop() async -> RecordingResult {
-        guard isRecording else { return RecordingResult(transcript: "", audioRelativePath: nil) }
+        guard isRecording else { return RecordingResult(transcript: "") }
         isRecording = false
         timerTask?.cancel()
         timerTask = nil
         let duration = elapsed
         startedAt = nil
         elapsed = 0
-        return RecordingResult(transcript: Self.stubTranscript(duration: duration), audioRelativePath: nil)
+        return RecordingResult(transcript: Self.stubTranscript(duration: duration), hadRecording: true)
     }
 
     private static func stubTranscript(duration: TimeInterval) -> String {

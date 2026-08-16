@@ -10,8 +10,11 @@ import CoreLocation
 /// If the user adds photos without typing a name, Vision-based OCR extracts a likely venue name
 /// from the biggest, most confident piece of text in the frame (typically storefront signage).
 struct WantToTryView: View {
+    let userID: UUID
+
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
+    @Environment(SyncEngine.self) private var sync
 
     @State private var name: String = ""
     @State private var address: String = ""
@@ -19,7 +22,7 @@ struct WantToTryView: View {
     @State private var photoItems: [PhotosPickerItem] = []
     @State private var showPhotosPicker: Bool = false
     @State private var transcript: String = ""
-    @State private var audioRelativePath: String?
+    @State private var hadVoiceNote: Bool = false
 
     /// Set when we auto-populated `name` from OCR — used to show the little "detected" hint and to
     /// clear the flag if the user starts editing.
@@ -169,7 +172,7 @@ struct WantToTryView: View {
                 .foregroundStyle(.secondary)
             HoldToRecordButton(recorder: recorder, hasRecording: !transcript.isEmpty) { result in
                 transcript = result.transcript
-                audioRelativePath = result.audioRelativePath
+                hadVoiceNote = result.hadRecording
             }
             .frame(maxWidth: .infinity, alignment: transcript.isEmpty ? .leading : .center)
             if !transcript.isEmpty {
@@ -341,41 +344,18 @@ struct WantToTryView: View {
                 address: candidate?.address ?? pendingResolution?.address ?? (address.isEmpty ? nil : address),
                 nameOverride: typedName.isEmpty ? nil : typedName,
                 locationSource: pendingResolution?.source ?? .manual,
-                audioRelativePath: audioRelativePath,
+                hadVoiceNote: hadVoiceNote,
                 kind: .wantToTry
             )
 
-            VisitRepository(context: modelContext).insert(place: place, visit: visit, photos: photoRows)
+            VisitRepository(context: modelContext, userID: userID)
+                .insert(place: place, visit: visit, photos: photoRows)
+            sync.requestSync(reason: .newLocalWrite)
         }
     }
 
     private func writePhotosToDisk() async -> [Photo] {
-        var rows: [Photo] = []
-        for (index, item) in photoItems.enumerated() {
-            var relativePath: String?
-            if let data = try? await item.loadTransferable(type: Data.self) {
-                let ext = detectExtension(for: data)
-                if let written = try? FileStorage.writeData(data, kind: .photos, fileExtension: ext) {
-                    relativePath = written.relativePath
-                }
-            }
-            rows.append(Photo(
-                relativePath: relativePath,
-                assetLocalIdentifier: item.itemIdentifier,
-                order: index
-            ))
-        }
-        return rows
-    }
-
-    private func detectExtension(for data: Data) -> String {
-        if data.count >= 4 {
-            let sig = [UInt8](data.prefix(4))
-            if sig[0] == 0x89, sig[1] == 0x50, sig[2] == 0x4E, sig[3] == 0x47 { return "png" }
-            if sig[0] == 0xFF, sig[1] == 0xD8, sig[2] == 0xFF { return "jpg" }
-            if sig[0] == 0x00, sig[1] == 0x00, sig[2] == 0x00 { return "heic" }
-        }
-        return "jpg"
+        await PhotoIngest.rows(from: photoItems)
     }
 
     private func parsedTags() -> [String] {

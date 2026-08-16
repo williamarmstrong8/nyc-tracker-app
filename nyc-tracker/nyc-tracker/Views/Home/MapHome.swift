@@ -2,15 +2,83 @@ import SwiftUI
 import SwiftData
 import MapKit
 
+/// The map, showing the user's own visits and — depending on the audience —
+/// their friends' too.
+///
+/// ## Two data sources, one pin set
+///
+/// Own visits come from SwiftData and are always present, in every mode. That is
+/// what keeps the map useful offline. Friend visits come from `visits_in_bounds`
+/// through `FriendVisitCache`, which is in-memory and never writes to the local
+/// store. `MapPlaceGrouping` merges them onto one annotation per place, joining
+/// on `Place.remotePlaceID`, so a venue you and a friend have both logged is one
+/// pin with both visits behind it.
+///
+/// ## A note on modes 2 and 3
+///
+/// "All friends" and "one friend" both keep the user's own pins on screen
+/// alongside the friends'. The brief's verification step reads "only B's pins",
+/// but two other requirements in the same brief — the place sheet pinning *your*
+/// visit to the top, and one merged pin when you and a friend logged the same
+/// venue — only make sense if your own visits are in the set. Own pins are
+/// visually distinct, so "only B's pins" still holds in the sense that matters:
+/// no other friend appears.
 struct MapHome: View {
     @Binding var openedVisit: Visit?
-    /// Set from outside (e.g. "View on Map" in the write-up) to recenter the camera on a visit
-    /// and open its callout. Cleared once handled.
+    /// Set from outside (e.g. "View on Map" in the write-up) to recenter the
+    /// camera on a visit and open its place. Cleared once handled.
     @Binding var focusVisitID: Visit.ID?
     @Bindable var filter: EntryFilter
     let mapScope: Namespace.ID
 
+    @Environment(SocialGraph.self) private var graph
+    @Environment(MapAudienceStore.self) private var audienceStore
+    @Environment(FriendVisitCache.self) private var friendCache
+    @Environment(WishlistStore.self) private var wishlist
+    @Environment(AppRouter.self) private var router
+
+    /// The map's one sheet slot.
+    ///
+    /// A single enum rather than two `.sheet(item:)` modifiers on the same view:
+    /// stacking sheet modifiers on one view is unreliable — the second can
+    /// silently win — and a single slot also makes it impossible to ask for two
+    /// at once.
+    private enum MapSheet: Identifiable {
+        /// A pin with visits behind it. Held as a key, not a group, so the sheet
+        /// re-derives its contents if the underlying visits change.
+        case place(PlaceKey)
+        /// A wishlist pin — somewhere with no visits yet.
+        case wishlistPlace(PlaceSummary)
+
+        var id: String {
+            switch self {
+            case .place(.remote(let id)):   return "place-r-\(id.uuidString)"
+            case .place(.local(let id)):    return "place-l-\(id.uuidString)"
+            case .wishlistPlace(let place): return "wishlist-\(place.id.uuidString)"
+            }
+        }
+    }
+
+    /// Scoped to the signed-in user. The predicate is built in `init` because a
+    /// `@Query` default can't reference an instance property.
     @Query private var visits: [Visit]
+
+    init(
+        userID: UUID,
+        openedVisit: Binding<Visit?>,
+        focusVisitID: Binding<Visit.ID?>,
+        filter: EntryFilter,
+        mapScope: Namespace.ID
+    ) {
+        _openedVisit = openedVisit
+        _focusVisitID = focusVisitID
+        self.filter = filter
+        self.mapScope = mapScope
+        _visits = Query(
+            filter: LocalStore.visitsPredicate(for: userID),
+            sort: [SortDescriptor(\Visit.visitedOn, order: .reverse)]
+        )
+    }
 
     /// Commissioners' Plan of 1811: Manhattan avenues run ~29° east of true north.
     /// Heading the camera that way makes the "vertical" streets run up the screen.
@@ -26,184 +94,518 @@ struct MapHome: View {
         )
     )
 
-    @State private var selectedVisitID: Visit.ID?
+    @State private var visibleRegion: MKCoordinateRegion?
+    @State private var presentedSheet: MapSheet?
 
-    private var filteredVisits: [Visit] {
+    private var audience: MapAudience { audienceStore.audience }
+
+    // MARK: - Derived data
+
+    private var ownVisits: [Visit] {
         visits.filter(filter.matches)
     }
 
+    private var friendVisits: [FriendVisit] {
+        guard audience.requiresNetwork else { return [] }
+        return friendCache.visits.filter(filter.matches)
+    }
+
+    private var placeGroups: [MapPlaceGroup] {
+        MapPlaceGrouping.groups(ownVisits: ownVisits, friendVisits: friendVisits)
+    }
+
+    private var clusters: [MapCluster] {
+        guard let visibleRegion else {
+            // Before the first camera callback there is no span to cluster
+            // against, so every place is its own pin. One frame at most.
+            return placeGroups.map {
+                MapCluster(id: keyString($0.key), coordinate: $0.coordinate, groups: [$0])
+            }
+        }
+        return MapPlaceGrouping.clusters(for: placeGroups, in: visibleRegion)
+    }
+
+    private func keyString(_ key: PlaceKey) -> String {
+        switch key {
+        case .remote(let id): "r-\(id.uuidString)"
+        case .local(let id):  "l-\(id.uuidString)"
+        }
+    }
+
+    private func group(for key: PlaceKey) -> MapPlaceGroup? {
+        placeGroups.first { $0.key == key }
+    }
+
+    /// Unresolved wishlist places, minus any that already have a pin.
+    ///
+    /// The subtraction matters: once a wishlist item resolves, the same venue is
+    /// also a real visit, and drawing both would put an "intention" pin directly
+    /// on top of a "memory" pin at identical coordinates. Resolved items are
+    /// excluded by `wishlist.active`; this also drops anything a visit pin
+    /// already covers, which catches the moment between capturing a visit and
+    /// the wishlist reloading.
+    private var wishlistPins: [WishlistEntry] {
+        guard wishlist.showsOnMap else { return [] }
+        let pinnedPlaceIDs = Set(placeGroups.compactMap { group -> UUID? in
+            if case .remote(let id) = group.key { return id }
+            return nil
+        })
+        return wishlist.active.filter { !pinnedPlaceIDs.contains($0.place.id) }
+    }
+
     var body: some View {
-        Map(position: $camera, selection: $selectedVisitID, scope: mapScope) {
+        Map(position: $camera, scope: mapScope) {
             // Blue "you are here" dot + heading arrow.
             UserAnnotation()
 
-            ForEach(filteredVisits) { visit in
-                if let place = visit.place {
-                    Marker(place.name, systemImage: markerSymbol(for: visit), coordinate: place.coordinate)
-                        .tint(markerTint(for: visit))
-                        .tag(visit.id)
+            ForEach(clusters) { cluster in
+                Annotation(
+                    cluster.isSingle ? (cluster.single?.name ?? "") : "",
+                    coordinate: cluster.coordinate,
+                    anchor: .center
+                ) {
+                    annotationContent(for: cluster)
+                }
+                .annotationTitles(cluster.isSingle ? .automatic : .hidden)
+            }
+
+            // Wishlist pins are drawn outside the cluster grid on purpose. They
+            // are a different KIND of thing — an intention, not a memory — and
+            // folding them into a cluster badge would make "7 places" mean a mix
+            // of somewhere you've been and somewhere you haven't.
+            ForEach(wishlistPins) { entry in
+                Annotation(
+                    entry.place.name,
+                    coordinate: CLLocationCoordinate2D(
+                        latitude: entry.place.latitude,
+                        longitude: entry.place.longitude
+                    ),
+                    anchor: .center
+                ) {
+                    WishlistPin(entry: entry) {
+                        Haptics.tap()
+                        presentedSheet = .wishlistPlace(entry.place)
+                    }
                 }
             }
         }
         .mapStyle(.standard(elevation: .realistic))
-        // HomeView renders its own compass + user-location button bound to `mapScope`; suppress
-        // MapKit's automatic default controls so they don't double up with (and overlap) those.
+        // HomeView renders its own compass + user-location button bound to
+        // `mapScope`; suppress MapKit's defaults so they don't double up.
         .mapControls {}
         .task {
-            // Request When-In-Use permission the first time the map appears so the blue dot can show.
+            // Request When-In-Use permission the first time the map appears.
             _ = await LocationProvider.shared.currentLocation()
         }
+        // `.onEnd` rather than `.continuous`: a pan is one event on release
+        // instead of one per frame, which is the first half of not hammering the
+        // API. The second half is the 350ms debounce inside `FriendVisitCache`,
+        // which coalesces several quick gestures into one request. Clustering
+        // also recomputes here, so it runs once per gesture rather than 60×/s.
+        .onMapCameraChange(frequency: .onEnd) { context in
+            visibleRegion = context.region
+            requestFriendVisits(for: context.region)
+        }
         .safeAreaInset(edge: .top) {
-            // Reserve room for the floating Map|List toggle so map controls don't collide.
+            // Reserve room for the floating controls above.
             Color.clear.frame(height: 52)
         }
-        .overlay(alignment: .bottom) {
-            if let visit = selectedVisit, let place = visit.place {
-                MapCalloutCard(place: place, visit: visit) {
-                    openedVisit = visit
-                }
-                .padding(.horizontal, 16)
-                .padding(.bottom, 140) // clear the floating bottom nav
-                .transition(.move(edge: .bottom).combined(with: .opacity))
+        .overlay(alignment: .top) { statusStrip }
+        .overlay(alignment: .center) { audienceEmptyState }
+        .animation(.snappy, value: presentedSheet?.id)
+        // Switching audience invalidates the fetched set immediately, so a mode
+        // change never leaves the previous mode's pins on screen while the new
+        // request is in flight.
+        .onChange(of: audience) { _, newValue in
+            presentedSheet = nil
+            if newValue.requiresNetwork {
+                friendCache.invalidateCoverage()
+                if let visibleRegion { requestFriendVisits(for: visibleRegion) }
+            } else {
+                friendCache.clearResults()
             }
         }
-        .animation(.snappy, value: selectedVisitID)
+        // Unfriending while looking at that friend's map: the selection resets to
+        // "mine" and the pins clear, rather than leaving orphaned pins for
+        // someone who is no longer a friend.
+        .onChange(of: graph.friendIDs) { _, ids in
+            let didReset = audienceStore.reconcile(
+                against: ids,
+                hasLoadedGraph: graph.hasLoaded
+            )
+            if didReset {
+                presentedSheet = nil
+                friendCache.clearResults()
+            } else if audience.requiresNetwork {
+                // Still a valid mode, but the friend set changed — refetch so an
+                // unfriended person's pins leave "all friends".
+                friendCache.invalidateCoverage()
+                if let visibleRegion { requestFriendVisits(for: visibleRegion) }
+            }
+        }
         .task(id: focusVisitID) {
             guard let id = focusVisitID else { return }
-            if let place = visits.first(where: { $0.id == id })?.place {
-                withAnimation(.easeInOut(duration: 0.6)) {
-                    camera = .camera(MapCamera(
-                        centerCoordinate: place.coordinate,
-                        distance: 900,
-                        heading: Self.manhattanGridHeading,
-                        pitch: 0
-                    ))
+            defer { focusVisitID = nil }
+            guard let visit = visits.first(where: { $0.id == id }), let place = visit.place else {
+                return
+            }
+            withAnimation(.easeInOut(duration: 0.6)) {
+                camera = .camera(MapCamera(
+                    centerCoordinate: place.coordinate,
+                    distance: 900,
+                    heading: Self.manhattanGridHeading,
+                    pitch: 0
+                ))
+            }
+            presentedSheet = .place(place.remotePlaceID.map(PlaceKey.remote) ?? .local(place.id))
+        }
+        .sheet(item: $presentedSheet) { sheet in
+            switch sheet {
+            case .wishlistPlace(let place):
+                RecommendedPlaceSheet(place: place)
+
+            case .place(let key):
+                if let group = group(for: key) {
+                    PlaceDetailSheet(group: group) { visit in
+                        presentedSheet = nil
+                        openedVisit = visit
+                    }
+                } else {
+                    // The place stopped existing under us — an unfriend, or a
+                    // filter change that excluded it. Say so rather than showing
+                    // a blank sheet.
+                    MissingPlaceSheet()
                 }
             }
-            selectedVisitID = id
-            focusVisitID = nil
         }
     }
 
-    private var selectedVisit: Visit? {
-        guard let id = selectedVisitID else { return nil }
-        return filteredVisits.first(where: { $0.id == id })
-    }
+    // MARK: - Annotations
 
-    private func markerSymbol(for visit: Visit) -> String {
-        if visit.kind == .wantToTry { return "bookmark.fill" }
-        return categorySymbol(for: visit.place?.category ?? .other)
-    }
-
-    private func markerTint(for visit: Visit) -> Color {
-        if visit.kind == .wantToTry { return .blue }
-        return categoryTint(for: visit.place?.category ?? .other)
-    }
-
-    private func categorySymbol(for category: PlaceCategory) -> String {
-        switch category {
-        case .restaurant: "fork.knife"
-        case .bar:        "wineglass.fill"
-        case .cafe:       "cup.and.saucer.fill"
-        case .bakery:     "birthday.cake.fill"
-        case .other:      "mappin"
+    @ViewBuilder
+    private func annotationContent(for cluster: MapCluster) -> some View {
+        if let group = cluster.single {
+            PlacePin(group: group) {
+                Haptics.tap()
+                presentedSheet = .place(group.key)
+            }
+        } else {
+            ClusterPin(cluster: cluster) {
+                Haptics.tap()
+                zoom(into: cluster)
+            }
         }
     }
 
-    private func categoryTint(for category: PlaceCategory) -> Color {
-        switch category {
-        case .restaurant: .orange
-        case .bar:        .purple
-        case .cafe:       .brown
-        case .bakery:     .pink
-        case .other:      .gray
+    /// Tapping a cluster zooms to fit its members rather than opening a list of
+    /// twelve places, which is what the map is already for.
+    private func zoom(into cluster: MapCluster) {
+        let lats = cluster.groups.map(\.coordinate.latitude)
+        let lngs = cluster.groups.map(\.coordinate.longitude)
+        guard let minLat = lats.min(), let maxLat = lats.max(),
+              let minLng = lngs.min(), let maxLng = lngs.max() else { return }
+
+        let center = CLLocationCoordinate2D(
+            latitude: (minLat + maxLat) / 2,
+            longitude: (minLng + maxLng) / 2
+        )
+        // A floor on the span stops a tight cluster from zooming to street level
+        // in one jump, which is disorienting.
+        let span = MKCoordinateSpan(
+            latitudeDelta: max((maxLat - minLat) * 1.6, 0.004),
+            longitudeDelta: max((maxLng - minLng) * 1.6, 0.004)
+        )
+
+        withAnimation(.easeInOut(duration: 0.45)) {
+            camera = .region(MKCoordinateRegion(center: center, span: span))
+        }
+    }
+
+    // MARK: - Fetching
+
+    private func requestFriendVisits(for region: MKCoordinateRegion) {
+        guard audience.requiresNetwork else { return }
+        friendCache.request(bounds: GeoBounds(region: region), audience: audience)
+    }
+
+    // MARK: - Status
+
+    /// Non-blocking status. Sits above the map and never covers it modally — a
+    /// spinner that freezes the map while a fetch is in flight is worse than
+    /// slightly stale pins, because panning is how you ask for the next fetch.
+    @ViewBuilder
+    private var statusStrip: some View {
+        VStack(spacing: 6) {
+            if audience.requiresNetwork, let failure = friendCache.failure {
+                statusPill(
+                    symbol: failure == .offline ? "wifi.slash" : "exclamationmark.triangle",
+                    text: failure.message,
+                    tint: .orange
+                ) {
+                    guard let visibleRegion else { return }
+                    Task { await friendCache.reload(bounds: GeoBounds(region: visibleRegion), audience: audience) }
+                }
+            } else if audience.requiresNetwork && friendCache.isLoading {
+                statusPill(symbol: nil, text: "Loading friends' places…", tint: .secondary, action: nil)
+            } else if audience.requiresNetwork && friendCache.isTruncated {
+                statusPill(
+                    symbol: "line.3.horizontal.decrease.circle",
+                    text: "Showing the most recent. Zoom in for more.",
+                    tint: .secondary,
+                    action: nil
+                )
+            }
+        }
+        // Clears both rows of floating controls (20 top inset + 52 toggle +
+        // 10 gap + 36 audience pill, plus breathing room).
+        .padding(.top, 170)
+        .padding(.horizontal, 16)
+        .animation(.snappy, value: friendCache.isLoading)
+        .animation(.snappy, value: friendCache.failure)
+    }
+
+    @ViewBuilder
+    private func statusPill(
+        symbol: String?,
+        text: String,
+        tint: Color,
+        action: (() -> Void)?
+    ) -> some View {
+        HStack(spacing: 8) {
+            if let symbol {
+                Image(systemName: symbol).font(.caption.weight(.semibold))
+            } else {
+                ProgressView().controlSize(.mini)
+            }
+            Text(text)
+                .font(.caption.weight(.medium))
+                .multilineTextAlignment(.leading)
+            if action != nil {
+                Text("Retry")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(Color.accentColor)
+            }
+        }
+        .foregroundStyle(tint == .secondary ? Color.secondary : tint)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .glassEffect(.regular, in: .capsule)
+        .onTapGesture { action?() }
+        .transition(.opacity.combined(with: .move(edge: .top)))
+    }
+
+    /// "All friends" with no friends is not an empty map, it's a missing
+    /// prerequisite — so it points at the place you'd go to fix it.
+    @ViewBuilder
+    private var audienceEmptyState: some View {
+        if audience == .allFriends, graph.hasLoaded, graph.friends.isEmpty {
+            VStack(spacing: 10) {
+                Image(systemName: "person.2.slash")
+                    .font(.system(size: 34, weight: .light))
+                    .foregroundStyle(.secondary)
+                Text("No friends yet")
+                    .font(.headline)
+                Text("Add friends to see where they've been.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                Button {
+                    Haptics.tap()
+                    router.activeTab = .friends
+                } label: {
+                    Label("Find people", systemImage: "person.badge.plus")
+                        .font(.subheadline.weight(.semibold))
+                        .padding(.horizontal, 8)
+                        .frame(minHeight: 36)
+                }
+                .buttonStyle(.glassProminent)
+            }
+            .padding(24)
+            .frame(maxWidth: 320)
+            .glassEffect(.regular, in: .rect(cornerRadius: 24))
+            .transition(.opacity)
+        } else if case .friend(let id) = audience,
+                  graph.hasLoaded,
+                  friendCache.visits.isEmpty,
+                  !friendCache.isLoading,
+                  friendCache.failure == nil {
+            // A real friend who simply hasn't logged anything in view. Named, so
+            // it doesn't read as a loading failure.
+            let name = graph.friend(withID: id)?.person.shortName ?? "They"
+            Text("\(name) hasn't logged anywhere around here.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(16)
+                .frame(maxWidth: 300)
+                .glassEffect(.regular, in: .rect(cornerRadius: 20))
+                .transition(.opacity)
         }
     }
 }
 
-// MARK: - Callout
+// MARK: - Pins
 
-private struct MapCalloutCard: View {
-    let place: Place
-    let visit: Visit
-    var onOpen: () -> Void
+/// One place. Own-only pins take the accent colour; anything with a friend in it
+/// takes that friend's palette colour, so "whose is that" is answerable without
+/// tapping.
+private struct PlacePin: View {
+    let group: MapPlaceGroup
+    var onTap: () -> Void
 
-    private var firstPhoto: Photo? {
-        visit.photos.sorted(by: { $0.order < $1.order }).first
+    private var tint: Color {
+        if group.isOwnOnly { return .accentColor }
+        guard let first = group.friendIDs.first else { return .accentColor }
+        // Mixed pins (you + a friend, or several friends) take the first
+        // friend's colour and wear a count badge; trying to blend several
+        // colours produces mud.
+        return FriendPalette.color(for: first)
     }
 
     var body: some View {
-        Button(action: onOpen) {
-            HStack(alignment: .center, spacing: 12) {
-                thumbnail
-                    .frame(width: 56, height: 56)
-                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 6) {
-                        Text(visit.title.isEmpty ? place.name : visit.title)
-                            .font(.headline)
-                            .foregroundStyle(.primary)
-                            .lineLimit(1)
-                        if visit.kind == .wantToTry {
-                            Image(systemName: "bookmark.fill")
-                                .font(.caption)
-                                .foregroundStyle(.blue)
-                        }
-                    }
-
-                    Text(visit.address ?? place.neighborhood)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-
-                    if !visit.tags.isEmpty {
-                        HStack(spacing: 4) {
-                            ForEach(visit.tags.prefix(3), id: \.self) { tag in
-                                Text(tag)
-                                    .font(.caption2.weight(.medium))
-                                    .foregroundStyle(.secondary)
-                                    .padding(.horizontal, 7)
-                                    .padding(.vertical, 2)
-                                    .background(Capsule().fill(Color(uiColor: .tertiarySystemFill)))
-                            }
-                        }
-                        .lineLimit(1)
+        Button(action: onTap) {
+            ZStack(alignment: .topTrailing) {
+                ZStack {
+                    Circle()
+                        .fill(tint)
+                        .shadow(color: .black.opacity(0.25), radius: 3, y: 1)
+                    Image(systemName: symbol)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(.white)
+                }
+                .frame(width: 32, height: 32)
+                // A white ring on your own pins is the second, colour-blind-safe
+                // channel for "this one is mine".
+                .overlay {
+                    if group.hasOwnVisit {
+                        Circle().strokeBorder(.white, lineWidth: 2.5)
                     }
                 }
-                Spacer(minLength: 4)
-                Image(systemName: "chevron.right")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.secondary)
+
+                if group.friendIDs.count > 1 {
+                    Text("\(group.friendIDs.count)")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(.white)
+                        .padding(3)
+                        .background(Circle().fill(Color.black.opacity(0.75)))
+                        .offset(x: 5, y: -4)
+                }
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
         }
-        .buttonStyle(.glass)
-        .accessibilityHint("Opens the write-up")
+        .buttonStyle(.plain)
+        .accessibilityLabel(accessibilityLabel)
     }
 
-    @ViewBuilder
-    private var thumbnail: some View {
-        if let photo = firstPhoto {
-            PhotoView(source: PhotoView.Source(photo: photo), contentMode: .fill)
-        } else {
+    private var symbol: String {
+        if group.isWantToTryOnly { return "bookmark.fill" }
+        switch group.category {
+        case .restaurant: return "fork.knife"
+        case .bar:        return "wineglass.fill"
+        case .cafe:       return "cup.and.saucer.fill"
+        case .bakery:     return "birthday.cake.fill"
+        case .other:      return "mappin"
+        }
+    }
+
+    private var accessibilityLabel: String {
+        var parts = [group.name]
+        if group.hasOwnVisit { parts.append("your visit") }
+        if !group.friendIDs.isEmpty {
+            parts.append(pluralized(group.friendIDs.count, "friend"))
+        }
+        return parts.joined(separator: ", ")
+    }
+}
+
+/// Somewhere the user means to go.
+///
+/// Deliberately unlike a visit pin: hollow rather than filled, dashed rather
+/// than solid, and a bookmark rather than a category glyph. A wishlist pin is an
+/// intention, not a memory, and the map is unreadable if the two look alike —
+/// the whole value of glancing at it is knowing which places you've actually
+/// been to.
+private struct WishlistPin: View {
+    let entry: WishlistEntry
+    var onTap: () -> Void
+
+    var body: some View {
+        Button(action: onTap) {
             ZStack {
-                Color(uiColor: .tertiarySystemFill)
-                Image(systemName: visit.kind == .wantToTry ? "bookmark.fill" : categoryFallbackSymbol)
-                    .font(.title3)
-                    .foregroundStyle(visit.kind == .wantToTry ? .blue : Color.secondary)
+                Circle()
+                    .fill(Color(uiColor: .systemBackground).opacity(0.92))
+                    .shadow(color: .black.opacity(0.18), radius: 2, y: 1)
+                Circle()
+                    .strokeBorder(
+                        Color.blue,
+                        style: StrokeStyle(lineWidth: 2, dash: [3, 2.5])
+                    )
+                Image(systemName: "bookmark")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.blue)
             }
+            .frame(width: 28, height: 28)
         }
+        .buttonStyle(.plain)
+        .accessibilityLabel(
+            entry.recommenders.isEmpty
+                ? "\(entry.place.name), on your wishlist"
+                : "\(entry.place.name), on your wishlist, recommended by \(entry.recommenders.attributionText ?? "a friend")"
+        )
+    }
+}
+
+/// Several places collapsed into one badge at low zoom.
+private struct ClusterPin: View {
+    let cluster: MapCluster
+    var onTap: () -> Void
+
+    /// Grows with count so a dense cluster reads as denser at a glance, but
+    /// clamped so it never dominates the map.
+    private var diameter: CGFloat {
+        min(52, 32 + CGFloat(cluster.placeCount) * 1.4)
     }
 
-    private var categoryFallbackSymbol: String {
-        switch place.category {
-        case .restaurant: "fork.knife"
-        case .bar:        "wineglass"
-        case .cafe:       "cup.and.saucer"
-        case .bakery:     "birthday.cake"
-        case .other:      "mappin"
+    var body: some View {
+        Button(action: onTap) {
+            ZStack {
+                Circle()
+                    .fill(Color.accentColor.opacity(0.9))
+                    .shadow(color: .black.opacity(0.25), radius: 3, y: 1)
+                Circle()
+                    .strokeBorder(.white.opacity(cluster.containsOwnVisit ? 0.95 : 0.5), lineWidth: 2)
+                Text("\(cluster.placeCount)")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(.white)
+            }
+            .frame(width: diameter, height: diameter)
         }
+        .buttonStyle(.plain)
+        // "Places", not "visits" — the count is venues, and saying so out loud
+        // is the only way a VoiceOver user can tell.
+        .accessibilityLabel("^[\(cluster.placeCount) place](inflect: true). Double tap to zoom in.")
+    }
+}
+
+/// Shown when the selected place vanishes while its sheet is open.
+private struct MissingPlaceSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "mappin.slash")
+                .font(.system(size: 34, weight: .light))
+                .foregroundStyle(.secondary)
+            Text("This place is no longer shown")
+                .font(.headline)
+            Text("It may have been filtered out, or you're no longer friends with the person who logged it.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+            Button("Done") { dismiss() }
+                .buttonStyle(.glass)
+                .padding(.top, 4)
+        }
+        .padding(32)
+        .presentationDetents([.medium])
     }
 }

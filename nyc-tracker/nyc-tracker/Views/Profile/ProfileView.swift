@@ -6,12 +6,31 @@ import Charts
 /// SwiftData rows — this task added auth, not sync — but the identity at the top is now the real
 /// signed-in profile rather than a mock.
 struct ProfileView: View {
-    @Query(sort: [SortDescriptor(\Visit.visitedOn, order: .reverse)]) private var visits: [Visit]
+    @Query private var visits: [Visit]
     @Environment(AuthManager.self) private var auth
+    @Environment(SyncEngine.self) private var sync
+    @Environment(SocialStatsCache.self) private var socialStats
+    @Environment(AppRouter.self) private var router
 
     @State private var showSettings = false
+    @State private var social: OwnSocialStats?
+    @State private var openedGapPlace: PlaceSummary?
 
     private var profile: Profile? { auth.state.profile }
+
+    /// Stats come from the local mirror, not the cloud.
+    ///
+    /// It is already in memory, so the numbers are instant and correct offline —
+    /// and because the sync engine keeps the mirror faithful, they agree with
+    /// what the server would say. Server-side aggregates only start earning their
+    /// round trip when the stats span other people (friend counts, "3 friends
+    /// have been here"), which is the next task.
+    init(userID: UUID) {
+        _visits = Query(
+            filter: LocalStore.visitsPredicate(for: userID),
+            sort: [SortDescriptor(\Visit.visitedOn, order: .reverse)]
+        )
+    }
 
     var body: some View {
         NavigationStack {
@@ -19,6 +38,8 @@ struct ProfileView: View {
                 LazyVStack(alignment: .leading, spacing: 20) {
                     identityHeader
                     heroStatCard
+                    socialSection
+                    WishlistSection()
                     if stats.totalVisited == 0 && stats.totalWantToTry == 0 {
                         emptyState
                     } else {
@@ -54,7 +75,104 @@ struct ProfileView: View {
             .sheet(isPresented: $showSettings) {
                 SettingsView()
             }
+            .sheet(item: $openedGapPlace) { place in
+                RecommendedPlaceSheet(place: place)
+            }
+            .task {
+                social = socialStats.cachedOwnStats()
+                social = await socialStats.ownStats()
+            }
         }
+    }
+
+    // MARK: - Social
+
+    /// Friend count, and the gap — places friends have been that the user hasn't.
+    ///
+    /// Server-side because the local mirror only holds the user's own rows and
+    /// so cannot answer either question. The gap list is the obvious hook back
+    /// into the wishlist: every row is somewhere with social proof that the user
+    /// can save in one tap.
+    @ViewBuilder
+    private var socialSection: some View {
+        if let social, social.friendCount > 0 {
+            SectionCard(title: "Friends", systemImage: "person.2.fill") {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(spacing: 10) {
+                        Button {
+                            Haptics.tap()
+                            router.activeTab = .friends
+                        } label: {
+                            HStack(spacing: 5) {
+                                Text("\(social.friendCount)").fontWeight(.semibold)
+                                Text("friends").foregroundStyle(.secondary)
+                                Image(systemName: "chevron.right")
+                                    .font(.caption2.weight(.bold))
+                                    .foregroundStyle(.secondary)
+                            }
+                            .font(.subheadline)
+                        }
+                        .buttonStyle(.plain)
+                        Spacer(minLength: 0)
+                    }
+
+                    if !social.gapPlaces.isEmpty {
+                        Divider()
+                        Text("\(pluralized(social.gapCount, "place")) friends have been that you haven't")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+
+                        ForEach(social.gapPlaces) { place in
+                            gapRow(place)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func gapRow(_ place: GapPlace) -> some View {
+        Button {
+            Haptics.tap()
+            openedGapPlace = PlaceSummary(
+                id: place.id,
+                name: place.name,
+                categoryRaw: place.category,
+                neighborhood: place.neighborhood,
+                streetAddress: nil,
+                latitude: place.latitude,
+                longitude: place.longitude
+            )
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: categorySymbol(for: place.placeCategory))
+                    .font(.caption)
+                    .foregroundStyle(categoryTint(for: place.placeCategory))
+                    .frame(width: 30, height: 30)
+                    .background(Circle().fill(categoryTint(for: place.placeCategory).opacity(0.15)))
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(place.name)
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                    if let neighborhood = place.neighborhood, !neighborhood.isEmpty {
+                        Text(neighborhood)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Spacer(minLength: 4)
+                Text(pluralized(place.friendCount, "friend"))
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Image(systemName: "chevron.right")
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(.secondary)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     // MARK: - Derived stats
@@ -323,19 +441,52 @@ struct ProfileView: View {
         }
     }
 
-    /// The old "Sign in to sync" placeholder is gone — you can't reach this screen
-    /// without a session any more. What's left is the honest status: the account
-    /// exists, but visits still live only on this device until the sync layer lands.
+    /// Sync status, in the one place a user goes looking for "is my stuff safe?".
+    ///
+    /// Deliberately specific — a count and a timestamp, not a green tick. "Synced"
+    /// with nothing behind it is the kind of reassurance that turns out to be
+    /// wrong at the worst moment; a number the user can watch go down is a claim
+    /// they can check.
     private var signInFooter: some View {
         VStack(spacing: 8) {
-            Label("Signed in", systemImage: "checkmark.seal.fill")
+            if sync.failedCount > 0 {
+                Label(
+                    "\(entryCountLabel(sync.failedCount)) didn't upload",
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(.orange)
+
+                Button("Try again") { sync.retryFailedNow() }
+                    .font(.caption.weight(.semibold))
+                    .buttonStyle(.glass)
+
+            } else if sync.pendingCount > 0 {
+                Label(
+                    sync.isSyncing
+                        ? "Uploading \(entryCountLabel(sync.pendingCount))…"
+                        : "\(entryCountLabel(sync.pendingCount)) waiting to upload",
+                    systemImage: sync.isSyncing ? "arrow.triangle.2.circlepath" : "clock"
+                )
                 .font(.subheadline.weight(.medium))
                 .foregroundStyle(.secondary)
 
-            Text("Your places are stored on this device. Syncing and publishing arrive in a future update.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
+            } else {
+                Label("All synced", systemImage: "checkmark.icloud.fill")
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(.secondary)
+            }
+
+            if let lastSynced = sync.lastSyncedAt {
+                Text("Last synced \(lastSynced.formatted(.relative(presentation: .named)))")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            } else {
+                Text("Your entries sync automatically when you're online.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
         }
         .padding(.top, 4)
     }
@@ -406,7 +557,7 @@ private struct VisitStats {
         Set(visited.compactMap { $0.place?.id }).count
     }
     var visitsWithPhotos: Int { visited.filter { !$0.photos.isEmpty }.count }
-    var visitsWithAudio: Int { visited.filter { $0.audioRelativePath != nil }.count }
+    var visitsWithAudio: Int { visited.filter(\.hadVoiceNote).count }
 
     var firstVisitedOn: Date? { visited.map(\.visitedOn).min() }
     var mostRecentVisit: Date? { visited.map(\.visitedOn).max() }

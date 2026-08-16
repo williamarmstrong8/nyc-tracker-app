@@ -12,6 +12,9 @@ enum AppTab: Equatable {
 
 struct BottomNavBar: View {
     var activeTab: AppTab
+    /// Pending items awaiting the user's response. Today that's incoming friend
+    /// requests; the next task adds recommendations to the same sum.
+    var friendsBadgeCount: Int = 0
     var onMap: () -> Void
     var onDiscover: () -> Void
     var onFriends: () -> Void
@@ -116,7 +119,13 @@ struct BottomNavBar: View {
             }
             Spacer(minLength: 76)
             HStack(spacing: 30) {
-                navIcon("person.2.fill", label: "Friends", isActive: activeTab == .friends, action: onFriends)
+                navIcon(
+                    "person.2.fill",
+                    label: "Friends",
+                    isActive: activeTab == .friends,
+                    badge: friendsBadgeCount,
+                    action: onFriends
+                )
                 navIcon("person.fill", label: "Profile", isActive: activeTab == .profile, action: onProfile)
             }
         }
@@ -127,7 +136,13 @@ struct BottomNavBar: View {
         .glassEffectID("nav-bar", in: glassNamespace)
     }
 
-    private func navIcon(_ symbol: String, label: String, isActive: Bool, action: @escaping () -> Void) -> some View {
+    private func navIcon(
+        _ symbol: String,
+        label: String,
+        isActive: Bool,
+        badge: Int = 0,
+        action: @escaping () -> Void
+    ) -> some View {
         Button {
             Haptics.tap()
             dismissNewEntryOptions()
@@ -138,9 +153,12 @@ struct BottomNavBar: View {
                 .foregroundStyle(isActive ? Color.accentColor : Color.primary)
                 .frame(width: 36, height: 36)
                 .contentShape(Rectangle())
+                .badgeOverlay(badge)
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(label)
+        .accessibilityLabel(
+            badge > 0 ? "\(label), \(pluralized(badge, "pending item"))" : label
+        )
         .accessibilityAddTraits(isActive ? [.isSelected] : [])
     }
 

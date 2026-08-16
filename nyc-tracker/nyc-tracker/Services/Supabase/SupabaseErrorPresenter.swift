@@ -76,6 +76,7 @@ enum SupabaseErrorPresenter {
         case profileUpdate
         case avatarUpload
         case accountDeletion
+        case sync
 
         var genericTitle: String {
             switch self {
@@ -85,6 +86,7 @@ enum SupabaseErrorPresenter {
             case .profileUpdate:   "Couldn't save changes"
             case .avatarUpload:    "Couldn't upload photo"
             case .accountDeletion: "Couldn't delete account"
+            case .sync:            "Couldn't sync"
             }
         }
     }

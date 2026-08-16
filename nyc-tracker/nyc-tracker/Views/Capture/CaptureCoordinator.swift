@@ -26,7 +26,7 @@ final class CaptureCoordinator {
     var transcript: String = ""
 
     /// Audio file that backs the transcript, if any.
-    var audioRelativePath: String?
+    var hadVoiceNote: Bool = false
 
     // Location resolution (populated by submitDetails).
     var resolvedCoordinate: CLLocationCoordinate2D?
@@ -63,7 +63,7 @@ final class CaptureCoordinator {
         nameInput = ""
         tagsInput = ""
         transcript = ""
-        audioRelativePath = nil
+        hadVoiceNote = false
         resolvedCoordinate = nil
         resolvedNeighborhood = nil
         resolvedAddress = nil
@@ -159,24 +159,10 @@ final class CaptureCoordinator {
     /// Commit the current draft to SwiftData through the repository and dismiss the flow.
     /// Returns the newly persisted Visit so callers can pan the map to it.
     func confirm(using repository: VisitRepository) async -> Visit {
-        // Load full-size images for the selected picker items and write them to disk.
-        var photoRows: [Photo] = []
-        for (index, item) in selectedItems.enumerated() {
-            let assetIdentifier = item.itemIdentifier
-            var relativePath: String?
-            if let data = try? await item.loadTransferable(type: Data.self) {
-                let ext = detectExtension(for: data)
-                if let written = try? FileStorage.writeData(data, kind: .photos, fileExtension: ext) {
-                    relativePath = written.relativePath
-                }
-            }
-            let photo = Photo(
-                relativePath: relativePath,
-                assetLocalIdentifier: assetIdentifier,
-                order: index
-            )
-            photoRows.append(photo)
-        }
+        // Downscale, thumbnail, and read metadata off each picked photo, then
+        // write both sizes to disk. This is the only image processing in the
+        // flow — the upload reuses these exact files.
+        let photoRows = await PhotoIngest.rows(from: selectedItems)
 
         let coordinate = resolvedCoordinate ?? chosenVenue?.coordinate ?? Self.nycFallback
         let category = chosenVenue?.category ?? .restaurant
@@ -228,7 +214,7 @@ final class CaptureCoordinator {
             locationSource: resolvedLocationSource,
             published: false,
             createdAt: Date(),
-            audioRelativePath: audioRelativePath,
+            hadVoiceNote: hadVoiceNote,
             rawPlaceGuess: rawPlaceGuess,
             kind: .visited
         )
@@ -240,16 +226,6 @@ final class CaptureCoordinator {
     }
 
     // MARK: - Helpers
-
-    private func detectExtension(for data: Data) -> String {
-        if data.count >= 4 {
-            let sig = [UInt8](data.prefix(4))
-            if sig[0] == 0x89, sig[1] == 0x50, sig[2] == 0x4E, sig[3] == 0x47 { return "png" }
-            if sig[0] == 0xFF, sig[1] == 0xD8, sig[2] == 0xFF { return "jpg" }
-            if sig[0] == 0x00, sig[1] == 0x00, sig[2] == 0x00 { return "heic" }
-        }
-        return "jpg"
-    }
 
     static let nycFallback = CLLocationCoordinate2D(latitude: 40.7300, longitude: -73.9950)
 }

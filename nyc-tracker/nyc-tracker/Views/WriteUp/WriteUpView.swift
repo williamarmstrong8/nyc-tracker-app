@@ -118,6 +118,7 @@ struct ReadOnlyWriteUpView: View {
     var onShowOnMap: () -> Void
 
     @Environment(\.modelContext) private var modelContext
+    @Environment(SyncEngine.self) private var sync
     @State private var showEdit = false
     @State private var showDeleteConfirm = false
 
@@ -242,7 +243,8 @@ struct ReadOnlyWriteUpView: View {
                         Button {
                             Haptics.tap()
                             visit.kind = .visited
-                            try? modelContext.save()
+                            VisitRepository(context: modelContext).saveEdit(to: visit)
+                            sync.requestSync(reason: .newLocalWrite)
                         } label: {
                             Label("Mark as visited", systemImage: "checkmark.circle")
                         }
@@ -250,7 +252,8 @@ struct ReadOnlyWriteUpView: View {
                         Button {
                             Haptics.tap()
                             visit.kind = .wantToTry
-                            try? modelContext.save()
+                            VisitRepository(context: modelContext).saveEdit(to: visit)
+                            sync.requestSync(reason: .newLocalWrite)
                         } label: {
                             Label("Move to want to try", systemImage: "bookmark")
                         }
@@ -274,7 +277,9 @@ struct ReadOnlyWriteUpView: View {
         }
         .confirmationDialog("Delete this entry?", isPresented: $showDeleteConfirm, titleVisibility: .visible) {
             Button("Delete", role: .destructive) {
-                VisitRepository(context: modelContext).delete(visit)
+                VisitRepository(context: modelContext, userID: visit.ownerUserID)
+                    .delete(visit)
+                sync.requestSync(reason: .newLocalWrite)
                 onDismiss()
             }
             Button("Cancel", role: .cancel) { }

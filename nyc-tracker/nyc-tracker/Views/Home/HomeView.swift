@@ -10,6 +10,7 @@ enum HomeMode: String, CaseIterable, Identifiable {
 }
 
 struct HomeView: View {
+    let userID: UUID
     @Binding var mode: HomeMode
     @Binding var openedVisit: Visit?
     @Binding var focusVisitID: Visit.ID?
@@ -30,22 +31,50 @@ struct HomeView: View {
             Group {
                 switch mode {
                 case .map:
-                    MapHome(openedVisit: $openedVisit, focusVisitID: $focusVisitID, filter: filter, mapScope: mapScope)
-                        .ignoresSafeArea()
+                    MapHome(
+                        userID: userID,
+                        openedVisit: $openedVisit,
+                        focusVisitID: $focusVisitID,
+                        filter: filter,
+                        mapScope: mapScope
+                    )
+                    .ignoresSafeArea()
                 case .list:
-                    ListHome(openedVisit: $openedVisit, filter: filter, path: $listPath)
+                    ListHome(userID: userID, openedVisit: $openedVisit, filter: filter, path: $listPath)
                 }
             }
 
+            // Unobtrusive, and only present when there is something to say —
+            // pending uploads, a failure, or a legacy migration in progress.
+            SyncStatusBar()
+                // Clears the audience row too when the map is showing, which
+                // adds a second row of floating controls above it.
+                .padding(.top, showFloatingControls ? (mode == .map ? 126 : 80) : 20)
+                .allowsHitTesting(true)
+
             if showFloatingControls {
-                ZStack {
-                    HomeModeToggle(mode: $mode)
-                    HStack {
-                        FilterButton(filter: filter)
-                        Spacer()
-                        SearchButton { showSearch = true }
+                VStack(spacing: 10) {
+                    ZStack {
+                        HomeModeToggle(mode: $mode)
+                        HStack {
+                            FilterButton(filter: filter)
+                            Spacer()
+                            SearchButton { showSearch = true }
+                        }
+                        .padding(.horizontal, 16)
                     }
-                    .padding(.horizontal, 16)
+
+                    // Its own row rather than squeezed alongside the toggle: the
+                    // label is variable-width (it can be a friend's name) and
+                    // would push the centred toggle off-centre as it changed.
+                    // Map only — the list is always the user's own entries.
+                    if mode == .map {
+                        HStack {
+                            MapAudienceControl()
+                            Spacer()
+                        }
+                        .padding(.horizontal, 16)
+                    }
                 }
                 .padding(.top, 20)
                 .transition(.opacity)
@@ -71,7 +100,7 @@ struct HomeView: View {
         .animation(.default, value: showFloatingControls)
         .mapScope(mapScope)
         .sheet(isPresented: $showSearch) {
-            SearchVisitsView(openedVisit: $openedVisit)
+            SearchVisitsView(userID: userID, openedVisit: $openedVisit)
         }
     }
 }

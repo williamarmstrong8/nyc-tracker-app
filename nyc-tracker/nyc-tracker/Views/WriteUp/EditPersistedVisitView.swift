@@ -6,6 +6,7 @@ import SwiftData
 struct EditPersistedVisitView: View {
     @Bindable var visit: Visit
     @Environment(\.modelContext) private var modelContext
+    @Environment(SyncEngine.self) private var sync
     @Environment(\.dismiss) private var dismiss
 
     @State private var tagsText: String = ""
@@ -88,7 +89,11 @@ struct EditPersistedVisitView: View {
             ToolbarItem(placement: .confirmationAction) {
                 Button("Save") {
                     Haptics.tap()
-                    try? modelContext.save()
+                    // `saveEdit` rather than `context.save()`: an edit that is
+                    // persisted but not re-queued looks correct on this device
+                    // forever and simply never reaches any other one.
+                    VisitRepository(context: modelContext).saveEdit(to: visit)
+                    sync.requestSync(reason: .newLocalWrite)
                     dismiss()
                 }
             }

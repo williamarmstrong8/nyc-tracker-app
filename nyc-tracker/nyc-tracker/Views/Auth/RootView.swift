@@ -1,4 +1,5 @@
 import SwiftUI
+import SwiftData
 
 /// The auth gate. Nothing reaches `ContentView` without a session and a username.
 ///
@@ -8,6 +9,9 @@ import SwiftUI
 /// read or write anything — a guest mode would be a screen full of empty states.
 struct RootView: View {
     @Environment(AuthManager.self) private var auth
+    @Environment(SyncEngine.self) private var sync
+    @Environment(SocialGraph.self) private var social
+    @Environment(\.modelContext) private var modelContext
 
     var body: some View {
         Group {
@@ -21,9 +25,41 @@ struct RootView: View {
             case .needsUsername:
                 UsernameSetupView()
 
-            case .signedIn:
-                // The existing app, untouched.
-                ContentView()
+            case .signedIn(let profile):
+                // `.id(profile.id)` is load-bearing, not a hint. Every scoped
+                // `@Query` below builds its predicate in `init`, and SwiftUI will
+                // happily reuse a view whose identity hasn't changed — so without
+                // this, signing out and in as a different user could keep the
+                // previous user's predicate alive and render their visits. The
+                // explicit identity forces the whole subtree to be rebuilt.
+                ContentView(userID: profile.id)
+                    .id(profile.id)
+                    .task(id: profile.id) {
+                        sync.configure(container: modelContext.container, userID: profile.id)
+                    }
+            }
+        }
+        // A session that can't be refreshed mid-sync has to end at the gate.
+        // The engine raises the flag; signing out here is what actually closes
+        // it, and the queue survives on disk for when they sign back in.
+        .onChange(of: sync.needsReauthentication) { _, needsReauth in
+            guard needsReauth else { return }
+            Task { await auth.signOut() }
+        }
+        .onChange(of: auth.state.isAuthenticated) { _, isAuthenticated in
+            if !isAuthenticated {
+                sync.teardown()
+                // Social data evaporates on sign-out and leaves no trace. The
+                // graph and the recommendations it holds are in memory here; the
+                // wishlist, feed, friend-visit and stats caches are `@State` on
+                // `ContentView` and die with its subtree when this view swaps
+                // away. The only social bytes that ever touched the disk are
+                // images in `PhotoCache`, cleared below. Nothing about another
+                // person — and nothing server-only, like the wishlist — was ever
+                // written to the user-scoped SwiftData store, so there is nothing
+                // there to clean up.
+                social.teardown()
+                PhotoCache.shared.clear()
             }
         }
         // Cross-fade rather than a slide: the loading -> signed-in transition

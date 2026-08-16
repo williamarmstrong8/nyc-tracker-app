@@ -10,6 +10,7 @@ import UIKit
 struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(AuthManager.self) private var auth
+    @Environment(SyncEngine.self) private var sync
 
     @State private var displayName = ""
     @State private var bio = ""
@@ -63,11 +64,37 @@ struct SettingsView: View {
                 guard let item else { return }
                 Task { await uploadAvatar(item) }
             }
+            // Sign-out with pending uploads: **warn, and preserve the queue.**
+            //
+            // The three options were upload-first, discard, or preserve. Uploading
+            // first is wrong because it makes sign-out block on a network the user
+            // may not have — a person signing out on a plane would be stuck in the
+            // app, and the whole point of the local-first design is that the
+            // network is never on the critical path. Discarding is obviously
+            // wrong: it destroys work the user can still see on screen.
+            //
+            // Preserving is safe precisely because rows are scoped by
+            // `ownerUserID`. The queue stays on disk, invisible to whoever signs
+            // in next, and drains automatically when its owner returns. The
+            // warning exists so that outcome is stated rather than discovered —
+            // "will finish uploading next time you sign in" is a promise the
+            // engine actually keeps.
             .confirmationDialog(
-                "Sign out of NYC Log?",
+                sync.hasUnsyncedWork ? "Sign out with unsynced entries?" : "Sign out of NYC Log?",
                 isPresented: $showSignOutConfirmation,
                 titleVisibility: .visible
             ) {
+                if sync.hasUnsyncedWork && NetworkMonitor.shared.isReachable {
+                    Button("Upload now") {
+                        Task {
+                            await sync.refreshNow()
+                            if !sync.hasUnsyncedWork {
+                                await auth.signOut()
+                                dismiss()
+                            }
+                        }
+                    }
+                }
                 Button("Sign out", role: .destructive) {
                     Task {
                         await auth.signOut()
@@ -76,7 +103,11 @@ struct SettingsView: View {
                 }
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text("Your logged places stay on this device.")
+                if sync.hasUnsyncedWork {
+                    Text("\(entryCountLabel(sync.pendingCount + sync.failedCount)) hasn't uploaded yet. They'll stay on this device and finish uploading the next time you sign in to this account.")
+                } else {
+                    Text("Everything you've logged is safely in the cloud.")
+                }
             }
             .sheet(isPresented: $showDeleteSheet) {
                 DeleteAccountView()
@@ -255,10 +286,14 @@ struct SettingsView: View {
             avatarItem = nil
         }
 
+        // Same treatment as visit photos, via the same code: square-cropped,
+        // downscaled, and re-encoded from bare pixels so no EXIF (including the
+        // location the selfie was taken) rides along into a public bucket.
         guard
             let data = try? await item.loadTransferable(type: Data.self),
-            let image = UIImage(data: data),
-            let jpeg = image.avatarJPEGData()
+            let jpeg = await Task.detached(priority: .userInitiated, operation: {
+                ImagePreparer.prepareAvatar(data)
+            }).value
         else {
             error = PresentableError(
                 title: "Couldn't read photo",
@@ -278,39 +313,12 @@ struct SettingsView: View {
     }
 }
 
-// MARK: - Avatar downscaling
-
-private extension UIImage {
-    /// Square-crops to 512pt and encodes as JPEG.
-    ///
-    /// The `avatars` bucket has a 2 MB limit, and a straight camera-roll JPEG blows
-    /// through that; more importantly the image is displayed at ~58pt, so uploading
-    /// 12 megapixels is pure waste. Doing this client-side means the size limit is
-    /// a backstop against bugs rather than something users hit routinely.
-    func avatarJPEGData(maxDimension: CGFloat = 512, quality: CGFloat = 0.85) -> Data? {
-        let side = min(size.width, size.height)
-        let cropRect = CGRect(
-            x: (size.width - side) / 2,
-            y: (size.height - side) / 2,
-            width: side,
-            height: side
-        )
-
-        guard let cropped = cgImage?.cropping(to: cropRect) else {
-            return jpegData(compressionQuality: quality)
-        }
-
-        let squared = UIImage(cgImage: cropped, scale: scale, orientation: imageOrientation)
-        let target = min(maxDimension, side)
-        let renderer = UIGraphicsImageRenderer(size: CGSize(width: target, height: target))
-        let resized = renderer.image { _ in
-            squared.draw(in: CGRect(x: 0, y: 0, width: target, height: target))
-        }
-        return resized.jpegData(compressionQuality: quality)
-    }
-}
+// Avatar downscaling now lives in `ImagePreparer.prepareAvatar`, shared with the
+// visit-photo path — one resize implementation, one place where metadata is
+// stripped, and no chance of the two drifting apart.
 
 #Preview {
     SettingsView()
         .environment(AuthManager())
+        .environment(SyncEngine())
 }

@@ -9,7 +9,15 @@ struct SearchVisitsView: View {
     @Binding var openedVisit: Visit?
 
     @Environment(\.dismiss) private var dismiss
-    @Query(sort: [SortDescriptor(\Visit.visitedOn, order: .reverse)]) private var visits: [Visit]
+    @Query private var visits: [Visit]
+
+    init(userID: UUID, openedVisit: Binding<Visit?>) {
+        _openedVisit = openedVisit
+        _visits = Query(
+            filter: LocalStore.visitsPredicate(for: userID),
+            sort: [SortDescriptor(\Visit.visitedOn, order: .reverse)]
+        )
+    }
 
     @State private var query: String = ""
     @State private var aiOrderedIDs: [UUID]?
@@ -223,7 +231,7 @@ private struct SearchResultRow: View {
                 .frame(width: 48, height: 48)
                 .overlay {
                     if let thumbnail {
-                        PhotoView(source: PhotoView.Source(photo: thumbnail), contentMode: .fill)
+                        PhotoView(source: PhotoView.Source(photo: thumbnail, wantsThumbnail: true), contentMode: .fill)
                             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                     } else {
                         Image(systemName: visit.kind == .wantToTry ? "bookmark.fill" : "mappin")

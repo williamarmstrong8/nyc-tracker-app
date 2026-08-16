@@ -6,12 +6,30 @@ import SwiftData
 ///   2. Tapping a card drills into the visits for that category.
 /// The active `EntryFilter` still applies to both levels — so kind/tag filters carry through.
 struct ListHome: View {
+    let userID: UUID
     @Binding var openedVisit: Visit?
     @Bindable var filter: EntryFilter
     @Binding var path: NavigationPath
 
     @Environment(\.modelContext) private var modelContext
-    @Query(sort: [SortDescriptor(\Visit.visitedOn, order: .reverse)]) private var visits: [Visit]
+    @Environment(SyncEngine.self) private var sync
+    @Query private var visits: [Visit]
+
+    init(
+        userID: UUID,
+        openedVisit: Binding<Visit?>,
+        filter: EntryFilter,
+        path: Binding<NavigationPath>
+    ) {
+        self.userID = userID
+        _openedVisit = openedVisit
+        self.filter = filter
+        _path = path
+        _visits = Query(
+            filter: LocalStore.visitsPredicate(for: userID),
+            sort: [SortDescriptor(\Visit.visitedOn, order: .reverse)]
+        )
+    }
 
     private var filteredVisits: [Visit] {
         visits.filter(filter.matches)
@@ -55,6 +73,10 @@ struct ListHome: View {
                 .padding(.horizontal, 16)
             }
             .background(Color(uiColor: .systemBackground))
+            // The manual sync trigger. Pushes anything queued first, then pulls —
+            // so a user who suspects something didn't upload has one gesture that
+            // both retries and re-checks, rather than two invisible ones.
+            .refreshable { await sync.refreshNow() }
             .toolbar(.hidden, for: .navigationBar)
             .navigationDestination(for: PlaceCategory.self) { category in
                 CategoryVisitsList(
@@ -92,7 +114,7 @@ private struct CategoryCard: View {
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
                     .fill(tint.gradient.opacity(0.28))
                 if let previewPhoto {
-                    PhotoView(source: PhotoView.Source(photo: previewPhoto), contentMode: .fill)
+                    PhotoView(source: PhotoView.Source(photo: previewPhoto, wantsThumbnail: true), contentMode: .fill)
                         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 }
                 Image(systemName: symbol)
@@ -161,6 +183,7 @@ private struct CategoryVisitsList: View {
     @Binding var openedVisit: Visit?
 
     @Environment(\.modelContext) private var modelContext
+    @Environment(SyncEngine.self) private var sync
 
     var body: some View {
         ScrollView {
@@ -222,7 +245,8 @@ private struct CategoryVisitsList: View {
 
     private func delete(_ visit: Visit) {
         Haptics.tap()
-        VisitRepository(context: modelContext).delete(visit)
+        VisitRepository(context: modelContext, userID: visit.ownerUserID).delete(visit)
+        sync.requestSync(reason: .newLocalWrite)
     }
 }
 
@@ -240,7 +264,7 @@ private struct ListRow: View {
                 .frame(width: 64, height: 64)
                 .overlay {
                     if let thumbnail {
-                        PhotoView(source: PhotoView.Source(photo: thumbnail), contentMode: .fill)
+                        PhotoView(source: PhotoView.Source(photo: thumbnail, wantsThumbnail: true), contentMode: .fill)
                             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                     } else if visit.kind == .wantToTry {
                         Image(systemName: "bookmark.fill")

@@ -57,7 +57,7 @@ struct DetailsView: View {
         VStack(alignment: .leading, spacing: 12) {
             HoldToRecordButton(recorder: recorder, hasRecording: !coordinator.transcript.isEmpty) { result in
                 coordinator.transcript = result.transcript
-                coordinator.audioRelativePath = result.audioRelativePath
+                coordinator.hadVoiceNote = result.hadRecording
             }
             .frame(maxWidth: .infinity, alignment: coordinator.transcript.isEmpty ? .leading : .center)
 
