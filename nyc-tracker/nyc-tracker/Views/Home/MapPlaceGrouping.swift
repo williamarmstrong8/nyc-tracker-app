@@ -1,6 +1,5 @@
 import Foundation
 import CoreLocation
-import MapKit
 
 // ============================================================================
 // One annotation per PLACE, not per visit.
@@ -85,23 +84,6 @@ struct MapPlaceGroup: Identifiable {
     }
 }
 
-/// A cluster of place groups drawn as a single badge at low zoom.
-struct MapCluster: Identifiable {
-    let id: String
-    let coordinate: CLLocationCoordinate2D
-    let groups: [MapPlaceGroup]
-
-    /// The badge shows PLACES, not visits. "12" next to a cluster has to mean
-    /// twelve venues — a count of visits would make one heavily-logged bar read
-    /// as a whole neighbourhood.
-    var placeCount: Int { groups.count }
-
-    var isSingle: Bool { groups.count == 1 }
-    var single: MapPlaceGroup? { groups.first }
-
-    var containsOwnVisit: Bool { groups.contains(where: \.hasOwnVisit) }
-}
-
 enum MapPlaceGrouping {
 
     // MARK: - Grouping
@@ -167,66 +149,5 @@ enum MapPlaceGrouping {
             group.friendVisits.sort { $0.visitedAt > $1.visitedAt }
             return group
         }
-    }
-
-    // MARK: - Clustering
-
-    /// Number of cells across the visible width. Higher means smaller cells and
-    /// less aggressive clustering. 14 keeps clusters roughly a thumb-width apart
-    /// at any zoom, which is the useful property — cluster size in *screen* terms
-    /// stays constant even though the geographic cell shrinks as you zoom in.
-    private static let cellsAcross: Double = 14
-
-    /// Grid-cluster groups against the visible region.
-    ///
-    /// A grid rather than true distance clustering (k-means, DBSCAN): those are
-    /// O(n²)-ish and have to re-run on every camera change, whereas this is one
-    /// pass with a dictionary. At the scale this map ever reaches — a few hundred
-    /// pins in view — the visual difference is negligible and the cost is not.
-    static func clusters(
-        for groups: [MapPlaceGroup],
-        in region: MKCoordinateRegion
-    ) -> [MapCluster] {
-        guard !groups.isEmpty else { return [] }
-
-        let latCell = max(region.span.latitudeDelta / cellsAcross, 1e-9)
-        let lngCell = max(region.span.longitudeDelta / cellsAcross, 1e-9)
-
-        var buckets: [String: [MapPlaceGroup]] = [:]
-        var order: [String] = []
-
-        for group in groups {
-            let latIndex = (group.coordinate.latitude / latCell).rounded(.down)
-            let lngIndex = (group.coordinate.longitude / lngCell).rounded(.down)
-            let id = "\(latIndex)|\(lngIndex)"
-
-            if buckets[id] == nil {
-                buckets[id] = []
-                order.append(id)
-            }
-            buckets[id]?.append(group)
-        }
-
-        return order.compactMap { id in
-            guard let bucket = buckets[id], !bucket.isEmpty else { return nil }
-            return MapCluster(
-                id: id,
-                // Centroid of the members rather than the cell centre, so a
-                // cluster sits on its pins instead of floating off-centre in a
-                // sparsely occupied cell.
-                coordinate: centroid(of: bucket),
-                groups: bucket
-            )
-        }
-    }
-
-    private static func centroid(of groups: [MapPlaceGroup]) -> CLLocationCoordinate2D {
-        guard !groups.isEmpty else {
-            return CLLocationCoordinate2D(latitude: 0, longitude: 0)
-        }
-        let count = Double(groups.count)
-        let lat = groups.reduce(0.0) { $0 + $1.coordinate.latitude } / count
-        let lng = groups.reduce(0.0) { $0 + $1.coordinate.longitude } / count
-        return CLLocationCoordinate2D(latitude: lat, longitude: lng)
     }
 }

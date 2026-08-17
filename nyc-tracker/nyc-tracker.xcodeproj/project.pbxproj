@@ -6,8 +6,14 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		12459E3C30316F760023354F /* Secrets.xcconfig in Resources */ = {isa = PBXBuildFile; fileRef = 12459E3B30316F760023354F /* Secrets.xcconfig */; };
+		12459E3F3031709F0023354F /* Supabase in Frameworks */ = {isa = PBXBuildFile; productRef = 12459E3E3031709F0023354F /* Supabase */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		12132F5530294D9500A7BF0F /* nyc-tracker.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "nyc-tracker.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		12459E3B30316F760023354F /* Secrets.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Secrets.xcconfig; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -36,6 +42,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				12459E3F3031709F0023354F /* Supabase in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -47,6 +54,8 @@
 			children = (
 				12132F5730294D9500A7BF0F /* nyc-tracker */,
 				12132F5630294D9500A7BF0F /* Products */,
+				12459E3B30316F760023354F /* Secrets.xcconfig */,
+				12459E3D3031709F0023354F /* Frameworks */,
 			);
 			sourceTree = "<group>";
 		};
@@ -56,6 +65,13 @@
 				12132F5530294D9500A7BF0F /* nyc-tracker.app */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		12459E3D3031709F0023354F /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			name = Frameworks;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -78,6 +94,7 @@
 			);
 			name = "nyc-tracker";
 			packageProductDependencies = (
+				12459E3E3031709F0023354F /* Supabase */,
 			);
 			productName = "nyc-tracker";
 			productReference = 12132F5530294D9500A7BF0F /* nyc-tracker.app */;
@@ -107,6 +124,9 @@
 			);
 			mainGroup = 12132F4C30294D9500A7BF0F;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				12459E213031686C0023354F /* XCRemoteSwiftPackageReference "supabase-swift" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 12132F5630294D9500A7BF0F /* Products */;
 			projectDirPath = "";
@@ -122,6 +142,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				12459E3C30316F760023354F /* Secrets.xcconfig in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -261,9 +282,11 @@
 		};
 		12132F6130294D9700A7BF0F /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = 12459E3B30316F760023354F /* Secrets.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = "nyc-tracker/nyc-tracker.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 73YJKR29VA;
@@ -302,6 +325,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = "nyc-tracker/nyc-tracker.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 73YJKR29VA;
@@ -357,6 +381,27 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		12459E213031686C0023354F /* XCRemoteSwiftPackageReference "supabase-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/supabase-community/supabase-swift";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.5.1;
+			};
+			traits = (
+			);
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		12459E3E3031709F0023354F /* Supabase */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 12459E213031686C0023354F /* XCRemoteSwiftPackageReference "supabase-swift" */;
+			productName = Supabase;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 12132F4D30294D9500A7BF0F /* Project object */;
 }

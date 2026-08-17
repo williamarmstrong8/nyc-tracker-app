@@ -28,6 +28,9 @@ struct TagChipRow: View {
 }
 
 /// Minimal wrapping HStack for chips.
+///
+/// SwiftUI has no built-in wrapping stack. A `LazyVGrid` with fixed columns
+/// can't size to text, and a horizontal `ScrollView` hides overflow.
 struct FlowLayout: Layout {
     var spacing: CGFloat = 8
 
@@ -38,7 +41,7 @@ struct FlowLayout: Layout {
         var lineHeight: CGFloat = 0
         for view in subviews {
             let size = view.sizeThatFits(.unspecified)
-            if lineWidth + size.width + spacing > maxWidth {
+            if lineWidth > 0 && lineWidth + size.width > maxWidth {
                 totalHeight += lineHeight + spacing
                 lineWidth = size.width + spacing
                 lineHeight = size.height
@@ -57,12 +60,16 @@ struct FlowLayout: Layout {
         var lineHeight: CGFloat = 0
         for view in subviews {
             let size = view.sizeThatFits(.unspecified)
-            if x + size.width > bounds.maxX {
+            if x > bounds.minX && x + size.width > bounds.maxX {
                 x = bounds.minX
                 y += lineHeight + spacing
                 lineHeight = 0
             }
-            view.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(size))
+            view.place(
+                at: CGPoint(x: x, y: y),
+                anchor: .topLeading,
+                proposal: ProposedViewSize(size)
+            )
             x += size.width + spacing
             lineHeight = max(lineHeight, size.height)
         }

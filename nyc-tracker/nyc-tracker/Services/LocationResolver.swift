@@ -19,22 +19,55 @@ struct VenueCandidate: Identifiable, Hashable {
     static func from(mapItem item: MKMapItem) -> VenueCandidate {
         let identifierString = item.identifier.map { String(describing: $0) }
         let id = identifierString ?? UUID().uuidString
-        let placemark = item.placemark
-        let street = [placemark.subThoroughfare, placemark.thoroughfare]
-            .compactMap { $0 }
-            .joined(separator: " ")
-        let address = [street, placemark.locality, placemark.administrativeArea]
-            .compactMap { $0?.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
-            .joined(separator: ", ")
         return VenueCandidate(
             id: id,
             name: item.name ?? "Unknown",
             category: PlaceCategory.from(poi: item.pointOfInterestCategory),
-            coordinate: placemark.coordinate,
-            address: address.isEmpty ? nil : address,
+            coordinate: item.location.coordinate,
+            address: MapKitAddress.displayAddress(for: item),
             externalPOIId: identifierString
         )
+    }
+}
+
+/// Reading addresses off an `MKMapItem` under the iOS 26 API.
+///
+/// `MKMapItem.placemark` — and with it `thoroughfare` / `subThoroughfare` /
+/// `locality` / `subLocality` — is deprecated. The replacement exposes formatted
+/// STRINGS (`MKAddress`, `MKAddressRepresentations`) rather than components, so
+/// address text is no longer assembled here; MapKit formats it for the device's
+/// region and we choose which of its forms to show.
+///
+/// The one thing genuinely lost is sub-locality. `CLPlacemark.subLocality`
+/// returned "Carroll Gardens"; the new API's finest granularity is `cityName`,
+/// which for the same coordinate is "Brooklyn". See `neighborhood(for:)`.
+enum MapKitAddress {
+
+    /// A one-line address for a venue row: street-level if MapKit has one,
+    /// otherwise the full address minus the country.
+    ///
+    /// `shortAddress` first because that is the form Apple intends for compact
+    /// display, and it is what the old `subThoroughfare + thoroughfare` string
+    /// was reaching for by hand.
+    static func displayAddress(for item: MKMapItem) -> String? {
+        if let short = item.address?.shortAddress?.nonEmpty {
+            return short
+        }
+        if let full = item.addressRepresentations?
+            .fullAddress(includingRegion: false, singleLine: true)?.nonEmpty {
+            return full
+        }
+        return item.address?.fullAddress.nonEmpty
+    }
+
+    /// The best available neighbourhood label.
+    ///
+    /// `cityWithContext` ("Brooklyn, NY") is deliberately NOT used as a
+    /// fallback: this string is displayed as a neighbourhood on list rows and
+    /// map groupings, and a state suffix would read as a different kind of
+    /// thing next to "Carroll Gardens" on the row above it.
+    static func neighborhood(for item: MKMapItem) -> String? {
+        item.addressRepresentations?.cityName?.nonEmpty
     }
 }
 
@@ -198,31 +231,46 @@ enum LocationResolver {
         return CLLocationCoordinate2D(latitude: lat, longitude: lng)
     }
 
+    /// Address text → coordinate, via MapKit's `MKGeocodingRequest`.
+    ///
+    /// Replaces `CLGeocoder.geocodeAddressString`, deprecated in iOS 26. The
+    /// initialiser is failable — it rejects an unusable query string outright,
+    /// which is a free early exit the old API didn't offer.
+    ///
+    /// Biased to the NYC region, which `CLGeocoder` had no way to express: "575
+    /// Henry St" is a real address in several states and this app is only ever
+    /// asking about one of them.
     private static func geocode(query: String) async -> CLLocationCoordinate2D? {
-        let geocoder = CLGeocoder()
+        guard let request = MKGeocodingRequest(addressString: query) else { return nil }
+        request.region = nycRegion
         do {
-            let placemarks = try await geocoder.geocodeAddressString(query)
-            return placemarks.first?.location?.coordinate
+            let items = try await request.mapItems
+            return items.first?.location.coordinate
         } catch {
             return nil
         }
     }
 
+    /// Coordinate → neighbourhood + address, via `MKReverseGeocodingRequest`.
+    ///
+    /// Replaces `CLGeocoder.reverseGeocodeLocation`, deprecated in iOS 26.
+    ///
+    /// Known regression, and it is the API's rather than ours: the replacement
+    /// has no sub-locality. Where this used to answer "Carroll Gardens" it now
+    /// answers "Brooklyn", because `MKAddressRepresentations` stops at
+    /// `cityName`. Everything downstream still works — the field is free text
+    /// the user can edit — but map groupings and list rows are coarser for
+    /// places resolved from a bare coordinate. Venues matched to a MapKit POI
+    /// are unaffected; they carry their own address.
     private static func reverseGeocode(coordinate: CLLocationCoordinate2D) async -> (neighborhood: String?, address: String?) {
-        let geocoder = CLGeocoder()
         let location = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
+        guard let request = MKReverseGeocodingRequest(location: location) else {
+            return (nil, nil)
+        }
         do {
-            let placemarks = try await geocoder.reverseGeocodeLocation(location)
-            guard let placemark = placemarks.first else { return (nil, nil) }
-            let neighborhood = placemark.subLocality ?? placemark.locality
-            let street = [placemark.subThoroughfare, placemark.thoroughfare]
-                .compactMap { $0 }
-                .joined(separator: " ")
-            let address = [street, placemark.locality, placemark.administrativeArea]
-                .compactMap { $0?.trimmingCharacters(in: .whitespaces) }
-                .filter { !$0.isEmpty }
-                .joined(separator: ", ")
-            return (neighborhood, address.isEmpty ? nil : address)
+            let items = try await request.mapItems
+            guard let item = items.first else { return (nil, nil) }
+            return (MapKitAddress.neighborhood(for: item), MapKitAddress.displayAddress(for: item))
         } catch {
             return (nil, nil)
         }
@@ -275,10 +323,10 @@ enum LocationResolver {
     private static func rank(items: [MKMapItem], near coordinate: CLLocationCoordinate2D) -> [MKMapItem] {
         let center = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
         return items
+            // `MKMapItem.location` is already a CLLocation in iOS 26, so the
+            // rebuild-from-a-placemark-coordinate dance is gone.
             .sorted { a, b in
-                let da = CLLocation(latitude: a.placemark.coordinate.latitude, longitude: a.placemark.coordinate.longitude).distance(from: center)
-                let db = CLLocation(latitude: b.placemark.coordinate.latitude, longitude: b.placemark.coordinate.longitude).distance(from: center)
-                return da < db
+                a.location.distance(from: center) < b.location.distance(from: center)
             }
             .prefix(5)
             .map { $0 }
@@ -299,8 +347,7 @@ enum LocationResolver {
             let score = nameMatchScore(query: normalizedQuery, candidate: name)
             let distance: CLLocationDistance = {
                 guard let center else { return .infinity }
-                let itemLoc = CLLocation(latitude: item.placemark.coordinate.latitude, longitude: item.placemark.coordinate.longitude)
-                return itemLoc.distance(from: center)
+                return item.location.distance(from: center)
             }()
             return Scored(item: item, score: score, distance: distance)
         }

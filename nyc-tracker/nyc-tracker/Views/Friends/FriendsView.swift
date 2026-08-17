@@ -1,17 +1,31 @@
 import SwiftUI
 
-/// The friends page: your accepted friends, alphabetical and searchable, with
-/// the inbox and user search one tap away.
+/// The friends page: your accepted friends, alphabetical and searchable.
+/// Add friends (search + requests) is a sheet, not a card on this list.
 ///
 /// Backed entirely by `SocialGraph`, which holds a single `friendship_edges()`
-/// result. There is no separate "my friends" fetch — the list, the inbox, and
-/// the badge are three views of one response.
+/// result. There is no separate "my friends" fetch — the list and the badge
+/// are two views of one response.
+///
+/// ## Same list, different destination
+///
+/// A row opens the conversation with that person, not their profile. The list
+/// itself is unchanged — still the friend graph, still alphabetical, still
+/// searchable by name or handle — because sorting by recent activity would make
+/// the page reorder itself under the user's thumb and would bury everyone they
+/// have never messaged. The only additions are the last-message line in place
+/// of the handle and an unread dot. The profile is still reachable, one tap
+/// further in, from the chat's header.
 struct FriendsView: View {
+    let userID: UUID
+
     @Environment(SocialGraph.self) private var graph
+    @Environment(ChatStore.self) private var chat
+    @Environment(SocialDemoMode.self) private var demo
 
     @State private var path = NavigationPath()
-    @State private var showUserSearch = false
     @State private var query = ""
+    @State private var showAddFriends = false
 
     private var filteredFriends: [FriendshipEdge] {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -36,97 +50,110 @@ struct FriendsView: View {
                     friendsList
                 }
             }
-            .background(Color(uiColor: .systemGroupedBackground))
+            .background(Color.black)
             .navigationTitle("Friends")
             .navigationBarTitleDisplayMode(.inline)
+            .appSearchable(text: $query, prompt: "Search friends")
             .toolbar {
+                if demo.isEnabled {
+                    ToolbarItem(placement: .principal) {
+                        VStack(spacing: 1) {
+                            Text("Friends").font(.headline)
+                            Text("Sample people").font(.caption2).foregroundStyle(.orange)
+                        }
+                    }
+                }
                 ToolbarItem(placement: .topBarLeading) {
                     Button {
                         Haptics.tap()
-                        showUserSearch = true
+                        showAddFriends = true
                     } label: {
-                        Label("Find people", systemImage: "person.badge.plus")
+                        Image(systemName: "person.badge.plus")
+                            .notificationDot(!graph.incoming.isEmpty)
                     }
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    NavigationLink(value: FriendsDestination.inbox) {
-                        Label("Inbox", systemImage: "tray")
-                            .badgeOverlay(graph.inboxBadgeCount)
-                    }
+                    .accessibilityLabel(
+                        graph.incoming.isEmpty
+                            ? "Add friends"
+                            : "Add friends, pending friend requests"
+                    )
                 }
             }
-            .navigationDestination(for: FriendsDestination.self) { destination in
-                switch destination {
-                case .inbox: InboxView()
-                }
+            .navigationDestination(for: ChatRoute.self) { route in
+                ChatView(userID: userID, person: route.person)
             }
+            // Still the profile: `PersonSummary` is what search results, request
+            // rows and the chat header push. Only the friends list itself has
+            // been re-pointed at a conversation.
             .navigationDestination(for: PersonSummary.self) { person in
                 FriendProfileView(person: person)
             }
-            .sheet(isPresented: $showUserSearch) {
-                UserSearchView()
-            }
         }
-        .task { graph.refresh() }
-    }
-
-    private enum FriendsDestination: Hashable {
-        case inbox
+        .sheet(isPresented: $showAddFriends) {
+            AddFriendsView()
+        }
+        .task {
+            graph.refresh()
+            chat.refreshThreads()
+        }
     }
 
     // MARK: - List
 
     private var friendsList: some View {
         List {
-            if !graph.incoming.isEmpty {
-                Section {
-                    NavigationLink(value: FriendsDestination.inbox) {
-                        Label(
-                            "^[\(graph.incoming.count) friend request](inflect: true)",
-                            systemImage: "person.crop.circle.badge.questionmark"
-                        )
-                        .font(.subheadline.weight(.semibold))
-                    }
-                }
-            }
-
             Section {
                 ForEach(filteredFriends) { edge in
-                    NavigationLink(value: edge.person) {
+                    NavigationLink(value: ChatRoute(person: edge.person)) {
                         friendRow(edge)
                     }
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+                    .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
                 }
                 if filteredFriends.isEmpty {
                     Text("No friends match \u{201C}\(query)\u{201D}.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
                 }
             } header: {
                 Text("^[\(graph.friends.count) friend](inflect: true)")
             }
         }
-        .listStyle(.insetGrouped)
-        .searchable(text: $query, prompt: "Search friends")
-        .refreshable { await graph.reload() }
-        // Clear the floating bottom nav.
-        .safeAreaInset(edge: .bottom) { Color.clear.frame(height: 76) }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .refreshable {
+            await graph.reload()
+            await chat.reloadThreads()
+        }
     }
 
+    /// One friend, as a thread. Falls back to the plain people row — avatar,
+    /// name, handle — until there is something to preview, so a friends list
+    /// with no conversations in it looks exactly as it did before.
     private func friendRow(_ edge: FriendshipEdge) -> some View {
-        HStack(spacing: 12) {
-            PersonAvatar(person: edge.person, size: 44, showsPaletteRing: true)
-            VStack(alignment: .leading, spacing: 2) {
-                PersonLabel(person: edge.person, nameFont: .subheadline.weight(.semibold))
-                if let bio = edge.bio, !bio.isEmpty {
-                    Text(bio)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+        let thread = chat.thread(with: edge.userID)
+
+        return FriendPersonRow(
+            person: edge.person,
+            subtitle: thread?.preview,
+            showsPaletteRing: true
+        ) {
+            if let thread, let sentAt = thread.lastMessageAt {
+                VStack(alignment: .trailing, spacing: 6) {
+                    Text(sentAt.formatted(.relative(presentation: .numeric, unitsStyle: .narrow)))
+                        .font(.caption2)
+                        .foregroundStyle(thread.hasUnread ? Color.accentColor : Color.secondary)
+                    if thread.hasUnread {
+                        Circle()
+                            .fill(Color.accentColor)
+                            .frame(width: 9, height: 9)
+                            .accessibilityLabel("^[\(thread.unreadCount) unread message](inflect: true)")
+                    }
                 }
             }
-            Spacer(minLength: 0)
         }
-        .padding(.vertical, 2)
     }
 
     // MARK: - Empty state
@@ -147,24 +174,13 @@ struct FriendsView: View {
 
             Button {
                 Haptics.tap()
-                showUserSearch = true
+                showAddFriends = true
             } label: {
-                Label("Find people", systemImage: "person.badge.plus")
+                Label("Add friends", systemImage: "person.badge.plus")
                     .frame(minWidth: 200, minHeight: 44)
             }
             .buttonStyle(.glassProminent)
             .padding(.top, 6)
-
-            if !graph.incoming.isEmpty {
-                Button {
-                    Haptics.tap()
-                    path.append(FriendsDestination.inbox)
-                } label: {
-                    Text("^[\(graph.incoming.count) pending request](inflect: true)")
-                        .font(.subheadline.weight(.semibold))
-                }
-                .buttonStyle(.glass)
-            }
         }
         .padding(.horizontal, 32)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -187,6 +203,19 @@ extension View {
                     .background(Capsule().fill(Color.red))
                     .offset(x: 10, y: -8)
                     .accessibilityLabel("^[\(count) pending item](inflect: true)")
+            }
+        }
+    }
+
+    /// Unnumbered red mark that something is waiting. Used on the add-friends
+    /// toolbar button so a pending request is visible without crowding the icon.
+    func notificationDot(_ show: Bool) -> some View {
+        overlay(alignment: .topTrailing) {
+            if show {
+                Circle()
+                    .fill(Color.red)
+                    .frame(width: 8, height: 8)
+                    .offset(x: 3, y: -2)
             }
         }
     }

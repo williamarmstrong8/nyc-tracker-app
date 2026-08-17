@@ -28,59 +28,50 @@ struct SearchVisitsView: View {
 
     var body: some View {
         NavigationStack {
-            List {
-                if !trimmedQuery.isEmpty && aiAvailable {
-                    Section {
-                        Button {
-                            Task { await askAI() }
-                        } label: {
-                            HStack(spacing: 10) {
-                                if isAskingAI {
-                                    ProgressView().controlSize(.small)
-                                } else {
-                                    Image(systemName: "sparkles")
-                                        .foregroundStyle(.tint)
-                                }
-                                Text(isAskingAI ? "Thinking…" : "Ask AI to find the best match")
-                                    .font(.subheadline.weight(.medium))
-                                Spacer()
-                            }
-                        }
-                        .disabled(isAskingAI)
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    if !trimmedQuery.isEmpty && aiAvailable {
+                        askAIRow
                         if let aiError {
                             Text(aiError)
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, 4)
+                                .padding(.bottom, 12)
+                        }
+                        if !displayResults.isEmpty {
+                            Divider().padding(.leading, 86)
                         }
                     }
-                }
 
-                if displayResults.isEmpty {
-                    Section {
+                    if displayResults.isEmpty {
                         emptyState
-                            .listRowBackground(Color.clear)
-                    }
-                } else {
-                    Section {
-                        ForEach(displayResults) { visit in
+                    } else {
+                        ForEach(Array(displayResults.enumerated()), id: \.element.id) { index, visit in
                             Button {
                                 Haptics.tap()
                                 openedVisit = visit
                                 dismiss()
                             } label: {
-                                SearchResultRow(visit: visit)
+                                SearchResultRow(
+                                    visit: visit,
+                                    tightTop: index == 0 && (trimmedQuery.isEmpty || !aiAvailable)
+                                )
                             }
                             .buttonStyle(.plain)
+
+                            if index < displayResults.count - 1 {
+                                Divider().padding(.leading, 86)
+                            }
                         }
                     }
                 }
+                .padding(.horizontal, 10)
             }
-            .listStyle(.insetGrouped)
-            .searchable(
-                text: $query,
-                placement: .navigationBarDrawer(displayMode: .always),
-                prompt: "Name, tag, vibe, dish, description…"
-            )
+            .contentMargins(.top, 0, for: .scrollContent)
+            .background(Color.black)
+            .appSearchable(text: $query, prompt: "Name, tag, vibe, dish, description…")
             .onChange(of: query) { _, _ in
                 aiOrderedIDs = nil
                 aiError = nil
@@ -93,6 +84,31 @@ struct SearchVisitsView: View {
                 }
             }
         }
+    }
+
+    private var askAIRow: some View {
+        Button {
+            Task { await askAI() }
+        } label: {
+            HStack(spacing: 14) {
+                Image(systemName: "sparkles")
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(.tint)
+                    .frame(width: 64, height: 64)
+                Text(isAskingAI ? "Thinking…" : "Ask AI to find the best match")
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(.primary)
+                Spacer(minLength: 4)
+                if isAskingAI {
+                    ProgressView().controlSize(.small)
+                }
+            }
+            .padding(.top, 2)
+            .padding(.bottom, 12)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(isAskingAI)
     }
 
     // MARK: - Filtering
@@ -219,52 +235,70 @@ private struct AISearchResult {
 
 private struct SearchResultRow: View {
     let visit: Visit
+    var tightTop: Bool = false
 
+    private var place: Place? { visit.place }
     private var thumbnail: Photo? {
         visit.photos.sorted(by: { $0.order < $1.order }).first
     }
 
     var body: some View {
-        HStack(alignment: .center, spacing: 12) {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color(uiColor: .tertiarySystemFill))
-                .frame(width: 48, height: 48)
+        HStack(alignment: .center, spacing: 14) {
+            thumbnailView
+                .frame(width: 64, height: 64)
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 .overlay {
-                    if let thumbnail {
-                        PhotoView(source: PhotoView.Source(photo: thumbnail, wantsThumbnail: true), contentMode: .fill)
-                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    } else {
-                        Image(systemName: visit.kind == .wantToTry ? "bookmark.fill" : "mappin")
-                            .foregroundStyle(.secondary)
+                    if visit.kind == .wantToTry {
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .strokeBorder(Color.blue, lineWidth: 2.5)
                     }
                 }
 
-            VStack(alignment: .leading, spacing: 3) {
-                Text(visit.title.isEmpty ? (visit.place?.name ?? "Untitled") : visit.title)
-                    .font(.headline)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(visit.title.isEmpty ? (place?.name ?? "Untitled") : visit.title)
+                    .font(.body.weight(.semibold))
                     .foregroundStyle(.primary)
                     .lineLimit(1)
-                HStack(spacing: 6) {
-                    if let neighborhood = visit.place?.neighborhood, !neighborhood.isEmpty {
-                        Text(neighborhood)
-                    }
-                    if !visit.tags.isEmpty {
-                        Text("•").foregroundStyle(.tertiary)
-                        Text(visit.tags.prefix(3).joined(separator: ", "))
-                            .lineLimit(1)
-                    }
+
+                if let neighborhood = place?.neighborhood, !neighborhood.isEmpty {
+                    Text(neighborhood)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
                 }
-                .font(.caption)
-                .foregroundStyle(.secondary)
+
+                if !visit.tags.isEmpty {
+                    Text(visit.tags.prefix(3).joined(separator: " · "))
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
             }
 
             Spacer(minLength: 4)
+
             Image(systemName: "chevron.right")
                 .font(.footnote.weight(.semibold))
                 .foregroundStyle(.tertiary)
         }
-        .padding(.vertical, 4)
+        .padding(.top, tightTop ? 2 : 12)
+        .padding(.bottom, 12)
         .contentShape(Rectangle())
+        .accessibilityValue(visit.kind == .wantToTry ? "Want to try" : "")
+    }
+
+    @ViewBuilder
+    private var thumbnailView: some View {
+        if let thumbnail {
+            PhotoView(source: PhotoView.Source(photo: thumbnail, wantsThumbnail: true), contentMode: .fill)
+        } else {
+            ZStack {
+                Color(uiColor: .secondarySystemFill)
+                Image(systemName: visit.kind == .wantToTry ? "bookmark" : "photo")
+                    .font(.system(size: 22, weight: .light))
+                    .foregroundStyle(.tertiary)
+            }
+        }
     }
 }
 

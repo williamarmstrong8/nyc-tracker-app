@@ -19,10 +19,16 @@ struct nyc_trackerApp: App {
     /// every time the user navigated away.
     @State private var sync = SyncEngine()
 
-    /// The friend graph. App-lifetime alongside the others so the inbox badge is
+    /// The friend graph. App-lifetime alongside the others so the friends badge is
     /// live on every screen without each one fetching it, and so a request
     /// accepted on the friends page is reflected on the map without a reload.
     @State private var social = SocialGraph()
+
+    /// Direct messages. App-lifetime for a harder reason than the others: it
+    /// owns a realtime channel, and a channel is registered with the shared
+    /// client rather than with whatever view created it. A store that died with
+    /// a screen would leave that subscription open and still delivering.
+    @State private var chat = ChatStore()
 
     @Environment(\.scenePhase) private var scenePhase
 
@@ -38,10 +44,23 @@ struct nyc_trackerApp: App {
         WindowGroup {
             // RootView is the auth gate. ContentView — the existing app — is only
             // reachable from inside it, and only with a session and a username.
-            RootView()
+            Group {
+                if ProcessInfo.processInfo.arguments.contains("-searchHarness") {
+                    SearchHarnessRoot()
+                } else {
+                    RootView()
+                }
+            }
                 .environment(auth)
                 .environment(sync)
                 .environment(social)
+                .environment(chat)
+                .environment(SocialDemoMode.shared)
+                // App-wide: no scroll indicators anywhere. Set once here rather
+                // than on every individual ScrollView/List/Form, since this
+                // environment value is inherited by every descendant scrollable
+                // view — including those inside sheets and pushed screens.
+                .scrollIndicators(.hidden)
         }
         .modelContainer(LocalStore.shared)
         .onChange(of: scenePhase) { _, phase in
@@ -55,6 +74,10 @@ struct nyc_trackerApp: App {
                 // backgrounded should be visible on return, and the graph has no
                 // realtime subscription. Cheap: one indexed query.
                 social.refresh()
+                // Chat does have one, but a socket dropped while backgrounded
+                // reconnects without replaying what it missed. One thread fetch
+                // on return is what makes the badge honest.
+                chat.refreshThreads()
             }
         }
     }

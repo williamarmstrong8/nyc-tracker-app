@@ -1,6 +1,7 @@
 import Foundation
 import Photos
 import PhotosUI
+import SwiftUI
 
 /// Turns picked library items into `Photo` rows with their bytes already on disk.
 ///

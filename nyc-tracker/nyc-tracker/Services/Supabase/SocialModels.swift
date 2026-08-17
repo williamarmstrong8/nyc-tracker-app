@@ -258,6 +258,19 @@ struct FriendVisit: Decodable, Identifiable, Hashable, Sendable {
         return placeName
     }
 
+    /// The shared venue behind this visit — enough to save or send it.
+    var placeSummary: PlaceSummary {
+        PlaceSummary(
+            id: placeID,
+            name: placeName,
+            categoryRaw: placeCategory,
+            neighborhood: neighborhood,
+            streetAddress: streetAddress,
+            latitude: latitude,
+            longitude: longitude
+        )
+    }
+
     enum CodingKeys: String, CodingKey {
         case visitID       = "visit_id"
         case visitedAt     = "visited_at"

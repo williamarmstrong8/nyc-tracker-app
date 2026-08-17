@@ -11,11 +11,10 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(AuthManager.self) private var auth
     @Environment(SyncEngine.self) private var sync
+    @Environment(AppRouter.self) private var router
 
     @State private var displayName = ""
-    @State private var bio = ""
     @State private var isSaving = false
-    @State private var savedRecently = false
 
     @State private var avatarItem: PhotosPickerItem?
     @State private var isUploadingAvatar = false
@@ -27,132 +26,130 @@ struct SettingsView: View {
 
     private var profile: Profile? { auth.state.profile }
 
-    private var appVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0"
-    }
-    private var buildNumber: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "1"
-    }
-
     /// Only enable Save when something actually changed — a Save button that's
     /// always live invites pointless writes and makes "did that save?" ambiguous.
     private var hasChanges: Bool {
         guard let profile else { return false }
         let currentName = profile.displayName ?? ""
-        let currentBio = profile.bio ?? ""
         return displayName.trimmingCharacters(in: .whitespacesAndNewlines) != currentName
-            || bio.trimmingCharacters(in: .whitespacesAndNewlines) != currentBio
     }
 
     var body: some View {
-        NavigationStack {
-            Form {
-                accountSection
-                profileSection
-                aboutSection
-                dangerSection
-            }
-            .navigationTitle("Settings")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }
+        List {
+            identitySection
+            profileSection
+            signOutSection
+            dangerSection
+        }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .listSectionSpacing(24)
+        .background(Color(uiColor: .systemGroupedBackground))
+        .navigationTitle("Settings")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("Save") {
+                    Task { await saveProfile() }
                 }
+                .fontWeight(.semibold)
+                .disabled(!hasChanges || isSaving)
             }
-            .onAppear(perform: loadFields)
-            .onChange(of: avatarItem) { _, item in
-                guard let item else { return }
-                Task { await uploadAvatar(item) }
-            }
-            // Sign-out with pending uploads: **warn, and preserve the queue.**
-            //
-            // The three options were upload-first, discard, or preserve. Uploading
-            // first is wrong because it makes sign-out block on a network the user
-            // may not have — a person signing out on a plane would be stuck in the
-            // app, and the whole point of the local-first design is that the
-            // network is never on the critical path. Discarding is obviously
-            // wrong: it destroys work the user can still see on screen.
-            //
-            // Preserving is safe precisely because rows are scoped by
-            // `ownerUserID`. The queue stays on disk, invisible to whoever signs
-            // in next, and drains automatically when its owner returns. The
-            // warning exists so that outcome is stated rather than discovered —
-            // "will finish uploading next time you sign in" is a promise the
-            // engine actually keeps.
-            .confirmationDialog(
-                sync.hasUnsyncedWork ? "Sign out with unsynced entries?" : "Sign out of NYC Log?",
-                isPresented: $showSignOutConfirmation,
-                titleVisibility: .visible
-            ) {
-                if sync.hasUnsyncedWork && NetworkMonitor.shared.isReachable {
-                    Button("Upload now") {
-                        Task {
-                            await sync.refreshNow()
-                            if !sync.hasUnsyncedWork {
-                                await auth.signOut()
-                                dismiss()
-                            }
+        }
+        .onAppear {
+            loadFields()
+            router.hidesBottomBar = true
+        }
+        .onDisappear { router.hidesBottomBar = false }
+        .onChange(of: avatarItem) { _, item in
+            guard let item else { return }
+            Task { await uploadAvatar(item) }
+        }
+        // Sign-out with pending uploads: **warn, and preserve the queue.**
+        //
+        // The three options were upload-first, discard, or preserve. Uploading
+        // first is wrong because it makes sign-out block on a network the user
+        // may not have — a person signing out on a plane would be stuck in the
+        // app, and the whole point of the local-first design is that the
+        // network is never on the critical path. Discarding is obviously
+        // wrong: it destroys work the user can still see on screen.
+        //
+        // Preserving is safe precisely because rows are scoped by
+        // `ownerUserID`. The queue stays on disk, invisible to whoever signs
+        // in next, and drains automatically when its owner returns. The
+        // warning exists so that outcome is stated rather than discovered —
+        // "will finish uploading next time you sign in" is a promise the
+        // engine actually keeps.
+        .confirmationDialog(
+            sync.hasUnsyncedWork ? "Sign out with unsynced entries?" : "Sign out of NYC Log?",
+            isPresented: $showSignOutConfirmation,
+            titleVisibility: .visible
+        ) {
+            if sync.hasUnsyncedWork && NetworkMonitor.shared.isReachable {
+                Button("Upload now") {
+                    Task {
+                        await sync.refreshNow()
+                        if !sync.hasUnsyncedWork {
+                            await auth.signOut()
+                            dismiss()
                         }
                     }
                 }
-                Button("Sign out", role: .destructive) {
-                    Task {
-                        await auth.signOut()
-                        dismiss()
-                    }
-                }
-                Button("Cancel", role: .cancel) {}
-            } message: {
-                if sync.hasUnsyncedWork {
-                    Text("\(entryCountLabel(sync.pendingCount + sync.failedCount)) hasn't uploaded yet. They'll stay on this device and finish uploading the next time you sign in to this account.")
-                } else {
-                    Text("Everything you've logged is safely in the cloud.")
+            }
+            Button("Sign out", role: .destructive) {
+                Task {
+                    await auth.signOut()
+                    dismiss()
                 }
             }
-            .sheet(isPresented: $showDeleteSheet) {
-                DeleteAccountView()
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            if sync.hasUnsyncedWork {
+                Text("\(entryCountLabel(sync.pendingCount + sync.failedCount)) hasn't uploaded yet. They'll stay on this device and finish uploading the next time you sign in to this account.")
+            } else {
+                Text("Everything you've logged is safely in the cloud.")
             }
-            .alert(
-                error?.title ?? "Something went wrong",
-                isPresented: Binding(
-                    get: { error != nil },
-                    set: { if !$0 { error = nil } }
-                ),
-                presenting: error
-            ) { _ in
-                Button("OK", role: .cancel) { error = nil }
-            } message: { error in
-                Text(error.message)
-            }
+        }
+        .sheet(isPresented: $showDeleteSheet) {
+            DeleteAccountView()
+        }
+        .alert(
+            error?.title ?? "Something went wrong",
+            isPresented: Binding(
+                get: { error != nil },
+                set: { if !$0 { error = nil } }
+            ),
+            presenting: error
+        ) { _ in
+            Button("OK", role: .cancel) { error = nil }
+        } message: { error in
+            Text(error.message)
         }
     }
 
     // MARK: - Sections
 
-    private var accountSection: some View {
-        Section("Account") {
-            HStack(spacing: 14) {
+    private var identitySection: some View {
+        Section {
+            VStack(spacing: 10) {
                 avatarPicker
+                    .frame(width: 108, height: 108)
+                    .clipShape(Circle())
+                    .overlay(Circle().stroke(Color(uiColor: .systemBackground), lineWidth: 3))
+                    .shadow(color: .black.opacity(0.12), radius: 8, x: 0, y: 4)
 
-                VStack(alignment: .leading, spacing: 3) {
+                VStack(spacing: 3) {
                     Text(profile?.bestName ?? "—")
-                        .font(.headline)
-                    if let handle = profile?.handle {
-                        Text(handle)
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                    }
+                        .font(.title3.weight(.semibold))
+                    Text(profile?.handle ?? "")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
                 }
-
-                Spacer()
             }
-            .padding(.vertical, 4)
-
-            // Usernames are the identity other people search by and link to, so
-            // changing one is not a settings toggle — it needs a redirect story
-            // first. Shown read-only rather than hidden so it's clearly deliberate.
-            LabeledContent("Username", value: profile?.username.map { "@\($0)" } ?? "—")
-                .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity)
+            .padding(.top, 8)
+            .listRowSeparator(.hidden)
+            .listRowBackground(Color.clear)
         }
     }
 
@@ -176,8 +173,6 @@ struct SettingsView: View {
                         .tint(.white)
                 }
             }
-            .frame(width: 58, height: 58)
-            .clipShape(Circle())
             .overlay(alignment: .bottomTrailing) {
                 Image(systemName: "pencil.circle.fill")
                     .font(.system(size: 18))
@@ -192,60 +187,80 @@ struct SettingsView: View {
     }
 
     private var avatarPlaceholder: some View {
-        ZStack {
-            Color(uiColor: .tertiarySystemFill)
-            Image(systemName: "person.fill")
-                .font(.system(size: 24))
-                .foregroundStyle(.secondary)
-        }
+        Image("Logo")
+            .resizable()
+            .scaledToFill()
     }
 
     private var profileSection: some View {
         Section {
-            TextField("Display name", text: $displayName)
-                .textContentType(.name)
+            LabeledField(
+                title: "Display name",
+                text: $displayName,
+                placeholder: "Your name",
+                showsBackground: false
+            )
+            .textContentType(.name)
+            .listRowSeparator(.hidden)
+            .listRowBackground(Color.clear)
 
-            TextField("Bio", text: $bio, axis: .vertical)
-                .lineLimit(2...5)
-
-            Button {
-                Task { await saveProfile() }
-            } label: {
-                HStack {
-                    Text(savedRecently ? "Saved" : "Save changes")
-                    Spacer()
-                    if isSaving {
-                        ProgressView().controlSize(.small)
-                    } else if savedRecently {
-                        Image(systemName: "checkmark").foregroundStyle(.green)
-                    }
-                }
-            }
-            .disabled(!hasChanges || isSaving)
+            // Usernames are the identity other people search by and link to, so
+            // changing one is not a settings toggle — it needs a redirect story
+            // first. Shown read-only rather than hidden so it's clearly deliberate.
+            readOnlyField(
+                title: "Username",
+                value: profile?.username.map { "@\($0)" } ?? "—"
+            )
+            .listRowSeparator(.hidden)
+            .listRowBackground(Color.clear)
         } header: {
             Text("Profile")
-        } footer: {
-            Text("Your display name and bio are visible to everyone on NYC Log.")
         }
     }
 
-    private var aboutSection: some View {
-        Section("About") {
-            LabeledContent("Version", value: "\(appVersion) (\(buildNumber))")
+    private func readOnlyField(title: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Text(value)
+                .textFieldStyle(.plain)
+                .padding(.vertical, 4)
+        }
+    }
+
+    private var signOutSection: some View {
+        Section {
+            Button {
+                Haptics.tap()
+                showSignOutConfirmation = true
+            } label: {
+                Text("Sign out")
+                    .fontWeight(.semibold)
+                    .frame(maxWidth: .infinity, minHeight: 30)
+            }
+            .buttonStyle(.glass)
+            .listRowSeparator(.hidden)
+            .listRowBackground(Color.clear)
         }
     }
 
     private var dangerSection: some View {
         Section {
-            Button("Sign out") {
-                Haptics.tap()
-                showSignOutConfirmation = true
-            }
-
-            Button("Delete account", role: .destructive) {
+            Button {
                 Haptics.tap()
                 showDeleteSheet = true
+            } label: {
+                Text("Delete account")
+                    .fontWeight(.semibold)
+                    .frame(maxWidth: .infinity, minHeight: 30)
             }
+            .buttonStyle(.glassProminent)
+            .tint(.red)
+            .listRowSeparator(.hidden)
+            .listRowBackground(Color.clear)
+        } header: {
+            Text("Delete account")
         } footer: {
             Text("Deleting your account permanently removes your profile, visits, photos, and friendships. This cannot be undone.")
         }
@@ -256,7 +271,6 @@ struct SettingsView: View {
     private func loadFields() {
         guard let profile else { return }
         displayName = profile.displayName ?? ""
-        bio = profile.bio ?? ""
     }
 
     private func saveProfile() async {
@@ -266,14 +280,10 @@ struct SettingsView: View {
         do {
             let updated = try await ProfileService.updateProfile(
                 displayName: displayName,
-                bio: bio
+                bio: profile?.bio
             )
             auth.apply(updated)
             Haptics.success()
-
-            savedRecently = true
-            try? await Task.sleep(for: .seconds(2))
-            savedRecently = false
         } catch {
             self.error = SupabaseErrorPresenter.presentable(error, context: .profileUpdate)
         }
@@ -318,7 +328,10 @@ struct SettingsView: View {
 // stripped, and no chance of the two drifting apart.
 
 #Preview {
-    SettingsView()
-        .environment(AuthManager())
-        .environment(SyncEngine())
+    NavigationStack {
+        SettingsView()
+    }
+    .environment(AuthManager())
+    .environment(SyncEngine())
+    .environment(AppRouter())
 }

@@ -46,6 +46,9 @@ final class CaptureCoordinator {
     var draftReturnIntent: ReturnIntent?
     var draftDish: String?
     var draftCompanions: String?
+    /// Venue type, seeded from the resolved MapKit venue but user-editable — MapKit
+    /// sometimes mistags a venue (a restaurant showing up as a cafe, say).
+    var draftCategory: PlaceCategory = .restaurant
 
     var isPresented: Bool = false
 
@@ -79,6 +82,7 @@ final class CaptureCoordinator {
         draftReturnIntent = nil
         draftDish = nil
         draftCompanions = nil
+        draftCategory = .restaurant
     }
 
     /// Runs location resolution + enrichment on the current inputs. If a confident venue match
@@ -103,6 +107,7 @@ final class CaptureCoordinator {
         venueCandidates = resolution.candidates
         chosenVenue = resolution.confidentPick
         rawPlaceGuess = nameInput.isEmpty ? nil : nameInput
+        draftCategory = chosenVenue?.category ?? .restaurant
 
         // 2) Enrichment
         let tagHints = tagsInput
@@ -152,6 +157,7 @@ final class CaptureCoordinator {
         if let venue {
             draftTitle = venue.name
             resolvedAddress = venue.address ?? resolvedAddress
+            draftCategory = venue.category
         }
         stage = .writeUp
     }
@@ -165,7 +171,7 @@ final class CaptureCoordinator {
         let photoRows = await PhotoIngest.rows(from: selectedItems)
 
         let coordinate = resolvedCoordinate ?? chosenVenue?.coordinate ?? Self.nycFallback
-        let category = chosenVenue?.category ?? .restaurant
+        let category = draftCategory
         let neighborhood = resolvedNeighborhood ?? "NYC"
         let resolvedTitle = draftTitle.isEmpty ? (chosenVenue?.name ?? "New Spot") : draftTitle
 

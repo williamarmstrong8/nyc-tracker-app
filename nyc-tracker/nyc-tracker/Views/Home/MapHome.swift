@@ -2,40 +2,33 @@ import SwiftUI
 import SwiftData
 import MapKit
 
-/// The map, showing the user's own visits and — depending on the audience —
-/// their friends' too.
+/// The map, showing either the user's own visits or their friends' — never both.
 ///
 /// ## Two data sources, one pin set
 ///
-/// Own visits come from SwiftData and are always present, in every mode. That is
-/// what keeps the map useful offline. Friend visits come from `visits_in_bounds`
-/// through `FriendVisitCache`, which is in-memory and never writes to the local
-/// store. `MapPlaceGrouping` merges them onto one annotation per place, joining
-/// on `Place.remotePlaceID`, so a venue you and a friend have both logged is one
-/// pin with both visits behind it.
+/// Own visits come from SwiftData and are the only pins in `.mine`, which is
+/// what keeps that mode useful offline. Friend visits come from
+/// `visits_in_bounds` through `FriendVisitCache`, which is in-memory and never
+/// writes to the local store. Switching to "all friends" or one friend drops
+/// your own pins so the map is actually theirs.
 ///
-/// ## A note on modes 2 and 3
-///
-/// "All friends" and "one friend" both keep the user's own pins on screen
-/// alongside the friends'. The brief's verification step reads "only B's pins",
-/// but two other requirements in the same brief — the place sheet pinning *your*
-/// visit to the top, and one merged pin when you and a friend logged the same
-/// venue — only make sense if your own visits are in the set. Own pins are
-/// visually distinct, so "only B's pins" still holds in the sense that matters:
-/// no other friend appears.
+/// `MapPlaceGrouping` still merges onto one annotation per place, joining on
+/// `Place.remotePlaceID`, so four friends at the same restaurant is one pin.
 struct MapHome: View {
     @Binding var openedVisit: Visit?
     /// Set from outside (e.g. "View on Map" in the write-up) to recenter the
-    /// camera on a visit and open its place. Cleared once handled.
+    /// camera on a visit. Cleared once handled.
     @Binding var focusVisitID: Visit.ID?
     @Bindable var filter: EntryFilter
-    let mapScope: Namespace.ID
+    private let userID: UUID
 
     @Environment(SocialGraph.self) private var graph
     @Environment(MapAudienceStore.self) private var audienceStore
     @Environment(FriendVisitCache.self) private var friendCache
     @Environment(WishlistStore.self) private var wishlist
     @Environment(AppRouter.self) private var router
+    @Environment(FeedStore.self) private var feed
+    @Environment(SocialStatsCache.self) private var socialStats
 
     /// The map's one sheet slot.
     ///
@@ -47,14 +40,22 @@ struct MapHome: View {
         /// A pin with visits behind it. Held as a key, not a group, so the sheet
         /// re-derives its contents if the underlying visits change.
         case place(PlaceKey)
+        /// The signed-in user's own visit write-up. Held as an id so the sheet
+        /// can re-fetch the SwiftData row rather than capturing a model object
+        /// from a Map annotation tap — that path crashed the presenter.
+        case ownVisit(UUID)
+        /// A single friend's visit — Explore-style, no save/send chrome.
+        case friendVisit(FriendVisit)
         /// A wishlist pin — somewhere with no visits yet.
         case wishlistPlace(PlaceSummary)
 
         var id: String {
             switch self {
-            case .place(.remote(let id)):   return "place-r-\(id.uuidString)"
-            case .place(.local(let id)):    return "place-l-\(id.uuidString)"
-            case .wishlistPlace(let place): return "wishlist-\(place.id.uuidString)"
+            case .place(.remote(let id)):     return "place-r-\(id.uuidString)"
+            case .place(.local(let id)):      return "place-l-\(id.uuidString)"
+            case .ownVisit(let id):           return "own-\(id.uuidString)"
+            case .friendVisit(let visit):     return "fvisit-\(visit.id.uuidString)"
+            case .wishlistPlace(let place):   return "wishlist-\(place.id.uuidString)"
             }
         }
     }
@@ -67,13 +68,12 @@ struct MapHome: View {
         userID: UUID,
         openedVisit: Binding<Visit?>,
         focusVisitID: Binding<Visit.ID?>,
-        filter: EntryFilter,
-        mapScope: Namespace.ID
+        filter: EntryFilter
     ) {
         _openedVisit = openedVisit
         _focusVisitID = focusVisitID
         self.filter = filter
-        self.mapScope = mapScope
+        self.userID = userID
         _visits = Query(
             filter: LocalStore.visitsPredicate(for: userID),
             sort: [SortDescriptor(\Visit.visitedOn, order: .reverse)]
@@ -102,34 +102,21 @@ struct MapHome: View {
     // MARK: - Derived data
 
     private var ownVisits: [Visit] {
-        visits.filter(filter.matches)
+        guard audience == .mine else { return [] }
+        return visits.filter(filter.matches)
     }
 
     private var friendVisits: [FriendVisit] {
         guard audience.requiresNetwork else { return [] }
-        return friendCache.visits.filter(filter.matches)
+        // `visits_in_bounds` with a nil user list includes the caller. Drop those
+        // so "all friends" is actually friends-only.
+        return friendCache.visits
+            .filter { $0.userID != userID }
+            .filter(filter.matches)
     }
 
     private var placeGroups: [MapPlaceGroup] {
         MapPlaceGrouping.groups(ownVisits: ownVisits, friendVisits: friendVisits)
-    }
-
-    private var clusters: [MapCluster] {
-        guard let visibleRegion else {
-            // Before the first camera callback there is no span to cluster
-            // against, so every place is its own pin. One frame at most.
-            return placeGroups.map {
-                MapCluster(id: keyString($0.key), coordinate: $0.coordinate, groups: [$0])
-            }
-        }
-        return MapPlaceGrouping.clusters(for: placeGroups, in: visibleRegion)
-    }
-
-    private func keyString(_ key: PlaceKey) -> String {
-        switch key {
-        case .remote(let id): "r-\(id.uuidString)"
-        case .local(let id):  "l-\(id.uuidString)"
-        }
     }
 
     private func group(for key: PlaceKey) -> MapPlaceGroup? {
@@ -145,7 +132,7 @@ struct MapHome: View {
     /// already covers, which catches the moment between capturing a visit and
     /// the wishlist reloading.
     private var wishlistPins: [WishlistEntry] {
-        guard wishlist.showsOnMap else { return [] }
+        guard audience == .mine, wishlist.showsOnMap else { return [] }
         let pinnedPlaceIDs = Set(placeGroups.compactMap { group -> UUID? in
             if case .remote(let id) = group.key { return id }
             return nil
@@ -154,25 +141,23 @@ struct MapHome: View {
     }
 
     var body: some View {
-        Map(position: $camera, scope: mapScope) {
+        Map(position: $camera) {
             // Blue "you are here" dot + heading arrow.
             UserAnnotation()
 
-            ForEach(clusters) { cluster in
+            ForEach(placeGroups) { group in
                 Annotation(
-                    cluster.isSingle ? (cluster.single?.name ?? "") : "",
-                    coordinate: cluster.coordinate,
+                    group.name,
+                    coordinate: group.coordinate,
                     anchor: .center
                 ) {
-                    annotationContent(for: cluster)
+                    PlacePin(group: group) {
+                        Haptics.tap()
+                        open(group)
+                    }
                 }
-                .annotationTitles(cluster.isSingle ? .automatic : .hidden)
             }
 
-            // Wishlist pins are drawn outside the cluster grid on purpose. They
-            // are a different KIND of thing — an intention, not a memory — and
-            // folding them into a cluster badge would make "7 places" mean a mix
-            // of somewhere you've been and somewhere you haven't.
             ForEach(wishlistPins) { entry in
                 Annotation(
                     entry.place.name,
@@ -190,9 +175,21 @@ struct MapHome: View {
             }
         }
         .mapStyle(.standard(elevation: .realistic))
-        // HomeView renders its own compass + user-location button bound to
-        // `mapScope`; suppress MapKit's defaults so they don't double up.
-        .mapControls {}
+        // An empty `.mapControls {}` still lets MapKit auto-show the compass
+        // (this camera sits 29° off north) and a location button. Naming each
+        // control and hiding it replaces those defaults. The blue
+        // `UserAnnotation` dot is the only location chrome that stays.
+        .mapControlVisibility(.hidden)
+        .mapControls {
+            MapUserLocationButton()
+                .mapControlVisibility(.hidden)
+            MapCompass()
+                .mapControlVisibility(.hidden)
+            MapPitchToggle()
+                .mapControlVisibility(.hidden)
+            MapScaleView()
+                .mapControlVisibility(.hidden)
+        }
         .task {
             // Request When-In-Use permission the first time the map appears.
             _ = await LocationProvider.shared.currentLocation()
@@ -200,8 +197,7 @@ struct MapHome: View {
         // `.onEnd` rather than `.continuous`: a pan is one event on release
         // instead of one per frame, which is the first half of not hammering the
         // API. The second half is the 350ms debounce inside `FriendVisitCache`,
-        // which coalesces several quick gestures into one request. Clustering
-        // also recomputes here, so it runs once per gesture rather than 60×/s.
+        // which coalesces several quick gestures into one request.
         .onMapCameraChange(frequency: .onEnd) { context in
             visibleRegion = context.region
             requestFriendVisits(for: context.region)
@@ -257,67 +253,72 @@ struct MapHome: View {
                     pitch: 0
                 ))
             }
-            presentedSheet = .place(place.remotePlaceID.map(PlaceKey.remote) ?? .local(place.id))
+            // Pan only — the write-up the user just left shouldn't reopen.
         }
         .sheet(item: $presentedSheet) { sheet in
-            switch sheet {
-            case .wishlistPlace(let place):
-                RecommendedPlaceSheet(place: place)
-
-            case .place(let key):
-                if let group = group(for: key) {
-                    PlaceDetailSheet(group: group) { visit in
-                        presentedSheet = nil
-                        openedVisit = visit
-                    }
-                } else {
-                    // The place stopped existing under us — an unfriend, or a
-                    // filter change that excluded it. Say so rather than showing
-                    // a blank sheet.
-                    MissingPlaceSheet()
-                }
-            }
+            mapSheet(sheet)
+                .environment(graph)
+                .environment(friendCache)
+                .environment(feed)
+                .environment(socialStats)
+                .environment(router)
         }
     }
-
-    // MARK: - Annotations
 
     @ViewBuilder
-    private func annotationContent(for cluster: MapCluster) -> some View {
-        if let group = cluster.single {
-            PlacePin(group: group) {
-                Haptics.tap()
-                presentedSheet = .place(group.key)
+    private func mapSheet(_ sheet: MapSheet) -> some View {
+        switch sheet {
+        case .wishlistPlace(let place):
+            RecommendedPlaceSheet(place: place)
+
+        case .ownVisit(let id):
+            if let visit = visits.first(where: { $0.id == id }) {
+                NavigationStack {
+                    ReadOnlyWriteUpView(
+                        visit: visit,
+                        onDismiss: { presentedSheet = nil },
+                        onShowOnMap: { presentedSheet = nil }
+                    )
+                    .toolbarBackground(.black, for: .navigationBar)
+                    .toolbarBackgroundVisibility(.visible, for: .navigationBar)
+                }
+                .preferredColorScheme(.dark)
+                .presentationBackground(.black)
+            } else {
+                MissingPlaceSheet()
             }
-        } else {
-            ClusterPin(cluster: cluster) {
-                Haptics.tap()
-                zoom(into: cluster)
+
+        case .friendVisit(let visit):
+            FriendVisitDetailSheet(visit: visit)
+
+        case .place(let key):
+            if let group = group(for: key) {
+                PlaceDetailSheet(group: group) { visit in
+                    presentedSheet = nil
+                    openedVisit = visit
+                }
+            } else {
+                // The place stopped existing under us — an unfriend, or a
+                // filter change that excluded it. Say so rather than showing
+                // a blank sheet.
+                MissingPlaceSheet()
             }
         }
     }
 
-    /// Tapping a cluster zooms to fit its members rather than opening a list of
-    /// twelve places, which is what the map is already for.
-    private func zoom(into cluster: MapCluster) {
-        let lats = cluster.groups.map(\.coordinate.latitude)
-        let lngs = cluster.groups.map(\.coordinate.longitude)
-        guard let minLat = lats.min(), let maxLat = lats.max(),
-              let minLng = lngs.min(), let maxLng = lngs.max() else { return }
-
-        let center = CLLocationCoordinate2D(
-            latitude: (minLat + maxLat) / 2,
-            longitude: (minLng + maxLng) / 2
-        )
-        // A floor on the span stops a tight cluster from zooming to street level
-        // in one jump, which is disorienting.
-        let span = MKCoordinateSpan(
-            latitudeDelta: max((maxLat - minLat) * 1.6, 0.004),
-            longitudeDelta: max((maxLng - minLng) * 1.6, 0.004)
-        )
-
-        withAnimation(.easeInOut(duration: 0.45)) {
-            camera = .region(MKCoordinateRegion(center: center, span: span))
+    /// Own map: the write-up for the latest visit. A single friend visit: their
+    /// visit details. Several people at one pin: the place sheet.
+    ///
+    /// Presented from this view's sheet, not `openedVisit` on the parent — a
+    /// Map annotation setting an ancestor's sheet during the tap gesture
+    /// crashed the presenter.
+    private func open(_ group: MapPlaceGroup) {
+        if audience == .mine, let visit = group.ownVisits.first {
+            presentedSheet = .ownVisit(visit.id)
+        } else if group.friendVisits.count == 1, let visit = group.friendVisits.first {
+            presentedSheet = .friendVisit(visit)
+        } else {
+            presentedSheet = .place(group.key)
         }
     }
 
@@ -356,9 +357,9 @@ struct MapHome: View {
                 )
             }
         }
-        // Clears both rows of floating controls (20 top inset + 52 toggle +
-        // 10 gap + 36 audience pill, plus breathing room).
-        .padding(.top, 170)
+        // Clears the floating toggle/filter/search row (8 top inset + 52 toggle,
+        // plus breathing room).
+        .padding(.top, 112)
         .padding(.horizontal, 16)
         .animation(.snappy, value: friendCache.isLoading)
         .animation(.snappy, value: friendCache.failure)
@@ -413,7 +414,7 @@ struct MapHome: View {
                     Haptics.tap()
                     router.activeTab = .friends
                 } label: {
-                    Label("Find people", systemImage: "person.badge.plus")
+                    Label("Add friends", systemImage: "person.badge.plus")
                         .font(.subheadline.weight(.semibold))
                         .padding(.horizontal, 8)
                         .frame(minHeight: 36)
@@ -426,13 +427,27 @@ struct MapHome: View {
             .transition(.opacity)
         } else if case .friend(let id) = audience,
                   graph.hasLoaded,
-                  friendCache.visits.isEmpty,
+                  friendCache.visits.filter({ $0.userID != userID }).isEmpty,
                   !friendCache.isLoading,
                   friendCache.failure == nil {
             // A real friend who simply hasn't logged anything in view. Named, so
             // it doesn't read as a loading failure.
             let name = graph.friend(withID: id)?.person.shortName ?? "They"
             Text("\(name) hasn't logged anywhere around here.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(16)
+                .frame(maxWidth: 300)
+                .glassEffect(.regular, in: .rect(cornerRadius: 20))
+                .transition(.opacity)
+        } else if audience == .allFriends,
+                  graph.hasLoaded,
+                  !graph.friends.isEmpty,
+                  friendCache.visits.filter({ $0.userID != userID }).isEmpty,
+                  !friendCache.isLoading,
+                  friendCache.failure == nil {
+            Text("None of your friends have logged anywhere around here.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -551,38 +566,6 @@ private struct WishlistPin: View {
                 ? "\(entry.place.name), on your wishlist"
                 : "\(entry.place.name), on your wishlist, recommended by \(entry.recommenders.attributionText ?? "a friend")"
         )
-    }
-}
-
-/// Several places collapsed into one badge at low zoom.
-private struct ClusterPin: View {
-    let cluster: MapCluster
-    var onTap: () -> Void
-
-    /// Grows with count so a dense cluster reads as denser at a glance, but
-    /// clamped so it never dominates the map.
-    private var diameter: CGFloat {
-        min(52, 32 + CGFloat(cluster.placeCount) * 1.4)
-    }
-
-    var body: some View {
-        Button(action: onTap) {
-            ZStack {
-                Circle()
-                    .fill(Color.accentColor.opacity(0.9))
-                    .shadow(color: .black.opacity(0.25), radius: 3, y: 1)
-                Circle()
-                    .strokeBorder(.white.opacity(cluster.containsOwnVisit ? 0.95 : 0.5), lineWidth: 2)
-                Text("\(cluster.placeCount)")
-                    .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(.white)
-            }
-            .frame(width: diameter, height: diameter)
-        }
-        .buttonStyle(.plain)
-        // "Places", not "visits" — the count is venues, and saying so out loud
-        // is the only way a VoiceOver user can tell.
-        .accessibilityLabel("^[\(cluster.placeCount) place](inflect: true). Double tap to zoom in.")
     }
 }
 

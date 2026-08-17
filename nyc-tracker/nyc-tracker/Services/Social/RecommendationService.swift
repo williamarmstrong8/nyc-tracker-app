@@ -28,6 +28,11 @@ enum RecommendationService {
         to recipients: [UUID],
         message: String?
     ) async throws -> [RecommendationSendResult] {
+        if let demo = SocialDemoMode.active {
+            await demo.simulateLatency()
+            return demo.sendPlace(placeID: placeID, to: recipients, message: message)
+        }
+
         let trimmed = message?.trimmingCharacters(in: .whitespacesAndNewlines)
         let params = RecommendPlaceParams(
             place: placeID,
@@ -44,7 +49,12 @@ enum RecommendationService {
     // MARK: - Inbox
 
     static func inboxRecommendations() async throws -> [InboxRecommendation] {
-        try await client
+        if let demo = SocialDemoMode.active {
+            await demo.simulateLatency()
+            return demo.inboxRecommendations()
+        }
+
+        return try await client
             .rpc("inbox_recommendations")
             .execute()
             .value
@@ -59,6 +69,10 @@ enum RecommendationService {
     @discardableResult
     static func markRead(_ ids: [UUID]) async throws -> Int {
         guard !ids.isEmpty else { return 0 }
+        if let demo = SocialDemoMode.active {
+            demo.markRecommendationsRead(ids)
+            return ids.count
+        }
         return try await client
             .rpc("mark_recommendations_read", params: ["p_ids": ids.map(\.uuidString)])
             .execute()
@@ -73,6 +87,12 @@ enum RecommendationService {
     /// survives so the unique constraint keeps working as an anti-spam guard and
     /// the wishlist item keeps its provenance.
     static func dismiss(_ id: UUID) async throws {
+        if let demo = SocialDemoMode.active {
+            await demo.simulateLatency()
+            demo.dismissRecommendation(id)
+            return
+        }
+
         try await client
             .from("recommendations")
             .update(["status": "dismissed"])
@@ -124,6 +144,11 @@ enum RecommendationService {
         after cursor: FeedCursor?,
         limit: Int = 20
     ) async throws -> [FeedItem] {
+        if let demo = SocialDemoMode.active {
+            await demo.simulateLatency()
+            return demo.feed(after: cursor, limit: limit)
+        }
+
         let params = FriendFeedParams(
             cursorVisitedAt: cursor?.visitedAt,
             cursorID: cursor?.id,
@@ -139,6 +164,10 @@ enum RecommendationService {
     // MARK: - Social stats
 
     static func placeSocial(placeID: UUID) async throws -> PlaceSocial? {
+        if let demo = SocialDemoMode.active {
+            return demo.placeSocial(placeID: placeID)
+        }
+
         let rows: [PlaceSocial] = try await client
             .rpc("place_social", params: ["p_place": placeID.uuidString])
             .execute()
@@ -147,6 +176,10 @@ enum RecommendationService {
     }
 
     static func friendOverlap(with userID: UUID) async throws -> FriendOverlap? {
+        if let demo = SocialDemoMode.active {
+            return demo.friendOverlap(with: userID)
+        }
+
         let rows: [FriendOverlap] = try await client
             .rpc("friend_overlap", params: ["p_user": userID.uuidString])
             .execute()
@@ -155,6 +188,10 @@ enum RecommendationService {
     }
 
     static func ownSocialStats(gapLimit: Int = 10) async throws -> OwnSocialStats? {
+        if let demo = SocialDemoMode.active {
+            return demo.ownSocialStats(gapLimit: gapLimit)
+        }
+
         let rows: [OwnSocialStats] = try await client
             .rpc("own_social_stats", params: ["p_gap_limit": gapLimit])
             .execute()

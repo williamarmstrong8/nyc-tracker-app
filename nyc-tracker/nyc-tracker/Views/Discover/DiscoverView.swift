@@ -1,4 +1,5 @@
 import SwiftUI
+import SwiftData
 
 /// The explore feed: what friends have been doing, newest first.
 ///
@@ -9,9 +10,15 @@ struct DiscoverView: View {
     @Environment(SocialGraph.self) private var graph
     @Environment(FeedStore.self) private var feed
     @Environment(AppRouter.self) private var router
+    @Environment(SocialDemoMode.self) private var demo
 
-    @State private var openedPlace: PlaceSummary?
-    @State private var showUserSearch = false
+    @State private var openedItem: FeedItem?
+    @State private var showAddFriends = false
+    /// How far the feed has scrolled past the top. Drives the title offset 1:1.
+    @State private var scrollOffset: CGFloat = 0
+
+    /// Distance over which the title fully leaves the bar with the scroll.
+    private static let titleScrollDistance: CGFloat = 44
 
     var body: some View {
         NavigationStack {
@@ -27,41 +34,79 @@ struct DiscoverView: View {
                     list
                 }
             }
-            .background(Color(uiColor: .systemGroupedBackground))
+            .background(Color(uiColor: .systemBackground))
             .navigationTitle("Explore")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbarBackgroundVisibility(.hidden, for: .navigationBar)
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItem(placement: .principal) {
+                    exploreTitle
+                }
+                ToolbarItem(placement: .topBarLeading) {
                     Button {
                         Haptics.tap()
-                        showUserSearch = true
+                        showAddFriends = true
                     } label: {
-                        Label("Find people", systemImage: "person.badge.plus")
+                        Label("Add friends", systemImage: "person.badge.plus")
+                            .badgeOverlay(graph.incoming.count)
                     }
                 }
             }
             .navigationDestination(for: PersonSummary.self) { person in
                 FriendProfileView(person: person)
             }
-            .sheet(item: $openedPlace) { place in
-                RecommendedPlaceSheet(place: place)
+            .sheet(isPresented: $showAddFriends) {
+                AddFriendsView()
             }
-            .sheet(isPresented: $showUserSearch) {
-                UserSearchView()
+            .sheet(item: $openedItem) { item in
+                NavigationStack {
+                    FriendVisitWriteUpView(
+                        visit: item.visit,
+                        onDismiss: { openedItem = nil },
+                        onShowOnMap: {
+                            openedItem = nil
+                            router.showMap()
+                        }
+                    )
+                    .toolbarBackground(.black, for: .navigationBar)
+                    .toolbarBackgroundVisibility(.visible, for: .navigationBar)
+                }
+                .preferredColorScheme(.dark)
+                .presentationBackground(.black)
             }
         }
         .task { feed.refresh() }
+    }
+
+    /// Overlay title in the sticky bar. Buttons stay put; the title tracks
+    /// scroll offset directly — no animation, just moves up with the feed.
+    private var exploreTitle: some View {
+        let travel = min(max(scrollOffset, 0), Self.titleScrollDistance)
+        let progress = travel / Self.titleScrollDistance
+
+        return VStack(spacing: 1) {
+            Text("Explore").font(.headline)
+            if demo.isEnabled {
+                Text("Sample activity").font(.caption2).foregroundStyle(.orange)
+            }
+        }
+        .opacity(1 - progress)
+        .offset(y: -travel)
+        .frame(minHeight: 34)
+        .clipped()
+        .accessibilityElement(children: .combine)
+        .accessibilityHidden(progress >= 1)
     }
 
     // MARK: - List
 
     private var list: some View {
         ScrollView {
-            LazyVStack(spacing: 16) {
+            LazyVStack(spacing: 28) {
                 ForEach(feed.items) { item in
                     FeedCard(
                         item: item,
-                        onOpenPlace: { openedPlace = placeSummary(for: item) }
+                        onOpenPlace: { openedItem = item }
                     )
                     // Prefetch three rows out, so the next page is usually
                     // already there by the time the user reaches it.
@@ -77,28 +122,17 @@ struct DiscoverView: View {
                         .foregroundStyle(.secondary)
                         .padding(.vertical, 24)
                 }
-
-                // Clear the floating bottom nav.
-                Color.clear.frame(height: 90)
             }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 16)
+            .padding(.horizontal, 1)
+            .padding(.vertical, 12)
         }
         .refreshable { await feed.reload() }
-    }
-
-    /// The feed's flat row carries the venue columns; this is the same place the
-    /// map and inbox would show, assembled from them.
-    private func placeSummary(for item: FeedItem) -> PlaceSummary {
-        PlaceSummary(
-            id: item.visit.placeID,
-            name: item.visit.placeName,
-            categoryRaw: item.visit.placeCategory,
-            neighborhood: item.visit.neighborhood,
-            streetAddress: item.visit.streetAddress,
-            latitude: item.visit.latitude,
-            longitude: item.visit.longitude
-        )
+        .scrollEdgeEffectHidden(true, for: .top)
+        .onScrollGeometryChange(for: CGFloat.self) { geometry in
+            geometry.contentOffset.y + geometry.contentInsets.top
+        } action: { _, newOffset in
+            scrollOffset = newOffset
+        }
     }
 
     // MARK: - Empty states
@@ -119,9 +153,9 @@ struct DiscoverView: View {
 
             Button {
                 Haptics.tap()
-                showUserSearch = true
+                showAddFriends = true
             } label: {
-                Label("Find people", systemImage: "person.badge.plus")
+                Label("Add friends", systemImage: "person.badge.plus")
                     .frame(minWidth: 200, minHeight: 44)
             }
             .buttonStyle(.glassProminent)
@@ -161,127 +195,292 @@ struct DiscoverView: View {
 
 // MARK: - Feed card
 
-/// One friend visit in the feed.
+/// One friend visit in the explore feed.
 ///
-/// Hero photo rather than the full carousel `FriendVisitCard` uses: a feed is
-/// scanned, and a horizontal photo strip inside a vertical scroll is a gesture
-/// conflict on every single row.
+/// BeReal-shaped: avatar + username + time, then a nearly full-width 3:4
+/// photo carousel, then the place and write-up as type underneath — not
+/// inside a card. `PhotoCarousel` pages horizontally without stealing the
+/// outer vertical scroll.
 private struct FeedCard: View {
     let item: FeedItem
     var onOpenPlace: () -> Void
 
     private var visit: FriendVisit { item.visit }
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            authorRow
-                .padding(.horizontal, 16)
-                .padding(.top, 14)
-                .padding(.bottom, 10)
-
-            if let hero = visit.photos.first {
-                PhotoView(source: .remote(path: hero.storagePath), contentMode: .fill)
-                    .frame(height: 200)
-                    .frame(maxWidth: .infinity)
-                    .clipped()
-            }
-
-            VStack(alignment: .leading, spacing: 8) {
-                placeRow
-
-                if let summary = visit.summary, !summary.isEmpty {
-                    Text(summary)
-                        .font(.subheadline)
-                        .foregroundStyle(.primary)
-                        .lineLimit(4)
-                }
-
-                if !visit.tags.isEmpty {
-                    FlowLayout(spacing: 6) {
-                        ForEach(visit.tags.prefix(6), id: \.self) { tag in
-                            Text(tag)
-                                .font(.caption2.weight(.medium))
-                                .foregroundStyle(.secondary)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 3)
-                                .background(Capsule().fill(Color(uiColor: .tertiarySystemFill)))
-                        }
-                    }
-                }
-
-                if item.friendPlaceCount > 1 {
-                    // Only worth saying when it's more than the author. "1 friend
-                    // has been here" on a card written by that friend is noise.
-                    Label(
-                        "\(pluralized(item.friendPlaceCount, "friend")) \(item.friendPlaceCount == 1 ? "has" : "have") been here",
-                        systemImage: "person.2.fill"
-                    )
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                }
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(Color(uiColor: .secondarySystemGroupedBackground))
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+    private var photoSources: [PhotoView.Source] {
+        visit.photos
+            .sorted { $0.sortOrder < $1.sortOrder }
+            .map { PhotoView.Source.friendPhoto(path: $0.storagePath) }
     }
 
+    private var username: String {
+        if let name = visit.person.username, !name.isEmpty { return name }
+        return visit.person.bestName
+    }
+
+    private var neighborhoodText: String? {
+        let value = visit.neighborhood?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let value, !value.isEmpty else { return nil }
+        return value
+    }
+
+    private var timeText: String {
+        visit.visitedAt.formatted(.relative(presentation: .numeric, unitsStyle: .narrow))
+    }
+
+    private var metaLine: String {
+        if let neighborhoodText {
+            return "\(neighborhoodText) • \(timeText)"
+        }
+        return timeText
+    }
+
+    private var summaryText: String? {
+        if let summary = visit.summary?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !summary.isEmpty {
+            return summary
+        }
+        if let transcript = visit.transcript?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !transcript.isEmpty {
+            return transcript
+        }
+        return nil
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            authorRow
+                .padding(.horizontal, 10)
+
+            photoCarousel
+                .onTapGesture(perform: onOpenPlace)
+                .accessibilityAddTraits(.isButton)
+                .accessibilityLabel("\(visit.placeName) photos")
+                .accessibilityHint("Opens \(visit.person.shortName)'s visit")
+
+            caption
+                .padding(.horizontal, 10)
+                .contentShape(Rectangle())
+                .onTapGesture(perform: onOpenPlace)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Avatar/name on the left navigate to the friend's profile; save/share on
+    /// the right act on the place. Two separate tap targets in one row rather
+    /// than one `NavigationLink` wrapping everything, so tapping an action icon
+    /// doesn't also push the profile.
     private var authorRow: some View {
         HStack(spacing: 10) {
             NavigationLink(value: visit.person) {
                 HStack(spacing: 10) {
-                    PersonAvatar(person: visit.person, size: 36, showsPaletteRing: true)
+                    PersonAvatar(person: visit.person, size: 36)
                     VStack(alignment: .leading, spacing: 1) {
-                        Text(visit.person.bestName)
-                            .font(.subheadline.weight(.semibold))
+                        Text(username)
+                            .font(.body.weight(.semibold))
                             .foregroundStyle(.primary)
                             .lineLimit(1)
-                        Text(visit.visitedAt.formatted(.relative(presentation: .named)))
-                            .font(.caption2)
+                        Text(metaLine)
+                            .font(.caption)
                             .foregroundStyle(.secondary)
+                            .lineLimit(1)
                     }
-                    Spacer(minLength: 0)
                 }
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .accessibilityLabel(visit.person.bestName)
+            .accessibilityHint("Opens profile")
 
-            if let rating = visit.rating {
-                Image(systemName: rating.symbol)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .accessibilityLabel(rating.label)
-            }
+            Spacer(minLength: 0)
+
+            ExplorePlaceActions(place: visit.placeSummary, photo: photoSources.first)
         }
     }
 
-    private var placeRow: some View {
-        Button(action: onOpenPlace) {
-            HStack(spacing: 8) {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(visit.placeName)
-                        .font(.headline)
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-                    if let neighborhood = visit.neighborhood, !neighborhood.isEmpty {
-                        Text(neighborhood)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
+    private var photoCarousel: some View {
+        Color.clear
+            .aspectRatio(3 / 4, contentMode: .fit)
+            .overlay {
+                if photoSources.isEmpty {
+                    emptyPhoto
+                } else {
+                    PhotoCarousel(sources: photoSources)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-                Spacer(minLength: 0)
-                Image(systemName: "chevron.right")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
             }
-            .contentShape(Rectangle())
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+
+    private var emptyPhoto: some View {
+        ZStack {
+            Color(uiColor: .secondarySystemFill)
+            Image(systemName: visit.visitKind == .wantToTry ? "bookmark" : "photo")
+                .font(.system(size: 40, weight: .ultraLight))
+                .foregroundStyle(.tertiary)
+        }
+    }
+
+    private var caption: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(visit.placeName)
+                .font(.title2.weight(.semibold))
+                .foregroundStyle(.primary)
+                .lineLimit(2)
+                .multilineTextAlignment(.leading)
+
+            if let summaryText {
+                Text(summaryText)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.leading)
+                    .lineLimit(3)
+            }
+
+            if item.friendPlaceCount > 1 {
+                Text("\(pluralized(item.friendPlaceCount, "friend")) \(item.friendPlaceCount == 1 ? "has" : "have") been here")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+    }
+}
+
+// MARK: - Save / share icons
+
+/// Icon-only save and send, right-aligned in the author row.
+///
+/// The feed card's content layer stays clean (no glass, no buttons with
+/// backgrounds) — these are plain glyphs, like a like/save row on any photo
+/// feed, not the full labeled buttons `PlaceActionsRow` uses in a detail
+/// sheet's functional layer.
+private struct ExplorePlaceActions: View {
+    let place: PlaceSummary
+    var photo: PhotoView.Source? = nil
+
+    @Environment(WishlistStore.self) private var wishlist
+    @Environment(SocialStatsCache.self) private var stats
+    @Environment(\.modelContext) private var modelContext
+    @Environment(AuthManager.self) private var auth
+    @Environment(SyncEngine.self) private var sync
+
+    @State private var isSaving = false
+    @State private var showSendSheet = false
+    @State private var showSavedConfirmation = false
+    @State private var confirmationTask: Task<Void, Never>?
+    /// What the tap asked for, held only until the store catches up. The save
+    /// RPC is a round trip; without this the bookmark stays hollow for as long
+    /// as the network takes and the tap reads as if it did nothing.
+    @State private var pendingSaved: Bool?
+
+    private var savedEntry: WishlistEntry? { wishlist.entry(forPlace: place.id) }
+    private var isSaved: Bool { pendingSaved ?? (savedEntry != nil) }
+
+    var body: some View {
+        // No spacing between the two: the 36pt tap frames already hold them
+        // apart, and the pair reads as one action cluster rather than two
+        // unrelated glyphs.
+        HStack(spacing: 0) {
+            shareButton
+            saveButton
+        }
+        .overlay(alignment: .topTrailing) {
+            if showSavedConfirmation {
+                savedConfirmation
+                    .offset(y: -36)
+                    .transition(.opacity.combined(with: .move(edge: .trailing)))
+            }
+        }
+        .sheet(isPresented: $showSendSheet) {
+            SendPlaceSheet(place: place, photo: photo)
+        }
+    }
+
+    private var saveButton: some View {
+        Button {
+            Haptics.tap()
+            Task { await toggleSaved() }
+        } label: {
+            Image(systemName: isSaved ? "bookmark.fill" : "bookmark")
+                .font(.system(size: 22, weight: .semibold))
+                .foregroundStyle(isSaved ? Color.blue : Color.primary)
+                .contentTransition(.symbolEffect(.replace))
+                .frame(width: 36, height: 36)
         }
         .buttonStyle(.plain)
-        .accessibilityHint("Opens \(visit.placeName)")
+        .disabled(isSaving)
+        .accessibilityLabel(isSaved ? "Remove from want to try" : "Save to want to try")
+    }
+
+    private var shareButton: some View {
+        Button {
+            Haptics.tap()
+            showSendSheet = true
+        } label: {
+            Image(systemName: "paperplane")
+                .font(.system(size: 21, weight: .semibold))
+                .foregroundStyle(Color.primary)
+                .frame(width: 36, height: 36)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Send to a friend")
+    }
+
+    private var savedConfirmation: some View {
+        Label("Added to Want to Try", systemImage: "checkmark")
+            .font(.caption.weight(.semibold))
+            .labelStyle(.titleAndIcon)
+            .foregroundStyle(.white)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(Capsule().fill(.black.opacity(0.82)))
+            .fixedSize()
+    }
+
+    private func toggleSaved() async {
+        isSaving = true
+        withAnimation(.snappy) { pendingSaved = !isSaved }
+        defer {
+            isSaving = false
+            pendingSaved = nil
+        }
+
+        if let savedEntry {
+            let removed = await wishlist.remove(itemID: savedEntry.id)
+            if removed { mirror?.removeMirror(placeID: place.id) }
+        } else {
+            let success = await wishlist.add(placeID: place.id)
+            if success {
+                mirror?.mirror(place)
+                announceSaved()
+            }
+        }
+        // The local mirror is a new local write like any other — the map and the
+        // Want to try list read it immediately, but the cloud copy still has to
+        // be pushed.
+        sync.requestSync(reason: .newLocalWrite)
+        // The user's own action — must be reflected immediately rather than
+        // waiting out the stats TTL.
+        stats.invalidate(placeID: place.id)
+    }
+
+    /// The Want to try mirror, once there is a signed-in user to attribute rows
+    /// to. Nil before sign-in, where there is no wishlist to save from anyway.
+    private var mirror: WantToTryMirror? {
+        guard let userID = auth.state.profile?.id else { return nil }
+        return WantToTryMirror(context: modelContext, userID: userID)
+    }
+
+    /// Brief confirmation instead of a modal or persistent banner — the same
+    /// weight as the tap that triggered it. Cancels/replaces any confirmation
+    /// still fading from a previous tap so rapid toggling can't stack timers.
+    private func announceSaved() {
+        confirmationTask?.cancel()
+        withAnimation(.snappy) { showSavedConfirmation = true }
+        confirmationTask = Task {
+            try? await Task.sleep(for: .seconds(1.6))
+            guard !Task.isCancelled else { return }
+            withAnimation(.snappy) { showSavedConfirmation = false }
+        }
     }
 }

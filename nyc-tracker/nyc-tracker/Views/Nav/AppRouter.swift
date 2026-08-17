@@ -16,6 +16,9 @@ import Observation
 final class AppRouter {
     var activeTab: AppTab = .home
     var homeMode: HomeMode = .map
+    /// A conversation is a full-screen thread. The floating dock would sit on
+    /// the composer and steal the bottom of the screen, so chat turns it off.
+    var hidesBottomBar = false
 
     /// Jump to the map. Used after picking a friend to view.
     func showMap() {

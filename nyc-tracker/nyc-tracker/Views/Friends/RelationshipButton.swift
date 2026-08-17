@@ -64,12 +64,33 @@ struct RelationshipButton: View {
                 .accessibilityHint("Cancels your request")
 
             case .incoming:
-                HStack(spacing: 8) {
-                    action("Accept", symbol: "checkmark", prominent: true) {
-                        perform(.accept)
+                if isCompact {
+                    GlassEffectContainer(spacing: 8) {
+                        HStack(spacing: 8) {
+                            compactGlassIcon(
+                                "checkmark",
+                                prominent: true,
+                                accessibilityLabel: "Accept"
+                            ) {
+                                perform(.accept)
+                            }
+                            compactGlassIcon(
+                                "xmark",
+                                prominent: false,
+                                accessibilityLabel: "Decline"
+                            ) {
+                                perform(.decline)
+                            }
+                        }
                     }
-                    action("Decline", symbol: "xmark", prominent: false) {
-                        perform(.decline)
+                } else {
+                    HStack(spacing: 8) {
+                        action("Accept", symbol: "checkmark", prominent: true) {
+                            perform(.accept)
+                        }
+                        action("Decline", symbol: "xmark", prominent: false) {
+                            perform(.decline)
+                        }
                     }
                 }
 
@@ -117,6 +138,38 @@ struct RelationshipButton: View {
                 }
         }
         .disabled(isBusy)
+
+        if prominent {
+            button.buttonStyle(.glassProminent)
+        } else {
+            button.buttonStyle(.glass)
+        }
+    }
+
+    /// Compact circular glass icon for the list-row accept/decline pair.
+    @ViewBuilder
+    private func compactGlassIcon(
+        _ symbol: String,
+        prominent: Bool,
+        accessibilityLabel: String,
+        handler: @escaping () -> Void
+    ) -> some View {
+        let button = Button {
+            Haptics.tap()
+            handler()
+        } label: {
+            Image(systemName: symbol)
+                .font(.system(size: 15, weight: .semibold))
+                .frame(width: 36, height: 36)
+                .opacity(isBusy ? 0 : 1)
+                .overlay {
+                    if isBusy {
+                        ProgressView().controlSize(.small)
+                    }
+                }
+        }
+        .disabled(isBusy)
+        .accessibilityLabel(accessibilityLabel)
 
         if prominent {
             button.buttonStyle(.glassProminent)

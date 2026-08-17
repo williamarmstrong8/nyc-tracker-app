@@ -14,6 +14,25 @@ struct PhotoView: View {
         case phAssetIdentifier(String)
         /// An object in the `visit-photos` bucket, fetched through `PhotoCache`.
         case remote(path: String)
+        /// A bundled asset-catalog image. Used by sample-data visits so the
+        /// explore feed and friend cards can show a real photo without hitting
+        /// storage.
+        case asset(String)
+
+        /// Friend-visit photos are storage paths, with two prefixed exceptions:
+        /// sample data is `asset:<catalog name>` and renders from the bundle,
+        /// and a message composed in sample mode is `local:<relative path>` and
+        /// renders from the user's own photo storage — neither has a server
+        /// object to fetch.
+        static func friendPhoto(path: String) -> Source {
+            if path.hasPrefix("asset:") {
+                return .asset(String(path.dropFirst("asset:".count)))
+            }
+            if path.hasPrefix("local:") {
+                return .relativePath(String(path.dropFirst("local:".count)))
+            }
+            return .remote(path: path)
+        }
 
         /// Build the best source for a persisted `Photo` row.
         ///
@@ -85,6 +104,10 @@ struct PhotoView: View {
                 }
             case .uiImage(let image):
                 Image(uiImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: contentMode)
+            case .asset(let name):
+                Image(name)
                     .resizable()
                     .aspectRatio(contentMode: contentMode)
             }

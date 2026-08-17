@@ -139,6 +139,16 @@ final class Place {
     /// the RPC entirely.
     var remotePlaceID: UUID?
 
+    /// Set when the user corrects `category` locally after the place has
+    /// already synced (e.g. Apple's MapKit classification mislabeled a
+    /// restaurant as a cafe). `find_or_create_place()` never overwrites an
+    /// existing `places.category`, so a correction needs its own push via
+    /// `update_place_category()` — this flag is what tells `SyncEngine` a
+    /// place is waiting on that call. Irrelevant (and left `false`) for a
+    /// place that hasn't synced yet, since its first upload already carries
+    /// the corrected value.
+    var categorySyncPending: Bool = false
+
     /// Which signed-in user's mirror this row belongs to.
     ///
     /// Places are shared and public upstream; locally they are partitioned per
@@ -181,6 +191,17 @@ final class Place {
 
     var coordinate: CLLocationCoordinate2D {
         CLLocationCoordinate2D(latitude: lat, longitude: lng)
+    }
+
+    /// User-initiated correction to the venue's category (e.g. "this is a
+    /// restaurant, not a cafe"). Queues the change for `SyncEngine` to push via
+    /// `update_place_category()` if this place has already synced.
+    func correctCategory(to newCategory: PlaceCategory) {
+        guard newCategory != category else { return }
+        category = newCategory
+        if remotePlaceID != nil {
+            categorySyncPending = true
+        }
     }
 }
 

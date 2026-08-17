@@ -1,69 +1,11 @@
 import SwiftUI
 
-/// The map's "whose places am I looking at" control.
+/// The map's "whose places am I looking at" picker.
 ///
-/// A single glass pill that names the current audience and opens a sheet, rather
-/// than a segmented control with a picker hanging off it. The requirement is
-/// that it stays usable at 50 friends, and a segment can't hold 50 of anything —
-/// the third mode would immediately become "…and a menu", which is a sheet with
-/// extra steps. The pill also has room to say *whose* map you are on, which is
-/// the thing you most want to know at a glance when the answer isn't "mine".
-struct MapAudienceControl: View {
-    @Environment(SocialGraph.self) private var graph
-    @Environment(MapAudienceStore.self) private var audience
-
-    @State private var showPicker = false
-
-    private var label: String {
-        switch audience.audience {
-        case .mine:
-            "My places"
-        case .allFriends:
-            "Friends"
-        case .friend(let id):
-            graph.friend(withID: id)?.person.shortName ?? "Friend"
-        }
-    }
-
-    private var symbol: String {
-        switch audience.audience {
-        case .mine:       "person.fill"
-        case .allFriends: "person.2.fill"
-        case .friend:     "person.crop.circle.fill"
-        }
-    }
-
-    var body: some View {
-        Button {
-            Haptics.tap()
-            showPicker = true
-        } label: {
-            HStack(spacing: 6) {
-                Image(systemName: symbol)
-                Text(label)
-                    .lineLimit(1)
-                Image(systemName: "chevron.down")
-                    .font(.caption2.weight(.bold))
-                    .foregroundStyle(.secondary)
-            }
-            .font(.subheadline.weight(.semibold))
-            .padding(.horizontal, 12)
-            .frame(height: 36)
-        }
-        .buttonStyle(.glass)
-        .accessibilityLabel("Showing \(label)")
-        .accessibilityHint("Choose whose places appear on the map")
-        .sheet(isPresented: $showPicker) {
-            MapAudiencePicker()
-                .presentationDetents([.medium, .large])
-                .presentationDragIndicator(.visible)
-        }
-    }
-}
-
-/// The picker sheet. Two fixed modes, then the friend list — searchable, because
-/// scrolling for a name stops working somewhere around twenty.
-private struct MapAudiencePicker: View {
+/// Presented from the filter menu rather than as its own floating pill. A sheet
+/// rather than a menu of friends, because the requirement is that it stays
+/// usable at 50 friends — a nested menu can't hold 50 of anything.
+struct MapAudiencePicker: View {
     @Environment(SocialGraph.self) private var graph
     @Environment(MapAudienceStore.self) private var audience
     @Environment(\.dismiss) private var dismiss
@@ -121,7 +63,7 @@ private struct MapAudiencePicker: View {
                 }
             }
             .listStyle(.insetGrouped)
-            .searchable(text: $query, prompt: "Search friends")
+            .appSearchable(text: $query, prompt: "Search friends")
             .navigationTitle("Show on map")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -135,7 +77,7 @@ private struct MapAudiencePicker: View {
     private var friendsSubtitle: String {
         graph.friends.isEmpty
             ? "No friends yet"
-            : pluralized(graph.friends.count, "friend")
+            : "Only their places — not yours."
     }
 
     private func modeRow(

@@ -15,6 +15,7 @@ struct ContentView: View {
     let userID: UUID
 
     @Environment(SocialGraph.self) private var graph
+    @Environment(ChatStore.self) private var chat
     @Environment(SyncEngine.self) private var sync
 
     /// Owns the active tab and home mode. An observable rather than `@State`
@@ -55,6 +56,17 @@ struct ContentView: View {
 
     private let enricher: EnricherProtocol = FoundationModelsEnricher()
 
+    /// The map is a full-bleed canvas under the glass. Other pages stay full
+    /// height too; they only add bottom safe-area padding so the last row can
+    /// scroll clear of the dock. Chat hides the dock, so it needs no clearance.
+    private var showsFullBleedMap: Bool {
+        router.activeTab == .home && router.homeMode == .map
+    }
+
+    private var showsBottomBar: Bool {
+        !router.hidesBottomBar
+    }
+
     var body: some View {
         ZStack(alignment: .bottom) {
             Group {
@@ -73,26 +85,48 @@ struct ContentView: View {
                 case .discover:
                     DiscoverView()
                 case .friends:
-                    FriendsView()
+                    FriendsView(userID: userID)
                 case .profile:
-                    ProfileView(userID: userID)
+                    ProfileView(userID: userID, openedVisit: $openedVisit, filter: filter)
                 }
             }
+            // Inset scroll/list content so the last row can clear the dock, but
+            // keep each page full-bleed so the glass sits on the page instead of
+            // a solid strip behind the bar.
+            .safeAreaPadding(.bottom, (showsFullBleedMap || !showsBottomBar) ? 0 : BottomNavBar.contentClearance)
 
-            BottomNavBar(
-                activeTab: router.activeTab,
-                friendsBadgeCount: graph.inboxBadgeCount,
-                onMap: { router.showMap() },
-                onDiscover: { router.activeTab = .discover },
-                onFriends: { router.activeTab = .friends },
-                onLogVisit: {
-                    pickerSelection = []
-                    showPhotosPicker = true
-                },
-                onWantToTry: { showWantToTry = true },
-                onProfile: { router.activeTab = .profile }
-            )
+            if showsBottomBar {
+                BottomNavBar(
+                    activeTab: router.activeTab,
+                    // Incoming friend requests plus unread messages.
+                    friendsBadgeCount: graph.incoming.count + chat.unreadCount,
+                    onMap: { router.showMap() },
+                    onDiscover: { router.activeTab = .discover },
+                    onFriends: { router.activeTab = .friends },
+                    onLogVisit: {
+                        pickerSelection = []
+                        showPhotosPicker = true
+                    },
+                    onWantToTry: { showWantToTry = true },
+                    onProfile: { router.activeTab = .profile }
+                )
+                // Slide the bar itself, not the full-height container below —
+                // a move transition travels the height of the view it's on.
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+                // Pin the dock to the physical bottom while a text field is
+                // focused. `.ignoresSafeArea(.keyboard)` only helps a view that
+                // wants the extra room, and the bar is content-sized, so on its
+                // own it kept riding up with the ZStack as the keyboard shrank
+                // it. The full-height container is what actually claims the
+                // space under the keyboard; the bar bottom-aligns inside it.
+                // Empty space in that frame isn't hit-testable, so the page
+                // underneath still takes taps, and pages keep their own keyboard
+                // avoidance because only this branch ignores the inset.
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                .ignoresSafeArea(.keyboard, edges: .bottom)
+            }
         }
+        .animation(.smooth(duration: 0.28), value: showsBottomBar)
         .environment(router)
         .environment(mapAudience)
         .environment(friendVisits)
@@ -104,6 +138,7 @@ struct ContentView: View {
         // state into the next.
         .task(id: userID) {
             graph.configure(userID: userID)
+            chat.configure(userID: userID)
             mapAudience.configure(userID: userID)
             wishlist.configure(userID: userID)
             feed.configure(userID: userID)
@@ -168,7 +203,18 @@ struct ContentView: View {
                         mapFocusVisitID = id
                     }
                 )
+                .toolbarBackground(.black, for: .navigationBar)
+                .toolbarBackgroundVisibility(.visible, for: .navigationBar)
             }
+            .preferredColorScheme(.dark)
+            .presentationBackground(.black)
+            // Sheets don't always inherit `@State` Observable values injected
+            // on the presenter; VisitFriendsSection needs these explicitly.
+            .environment(graph)
+            .environment(friendVisits)
+            .environment(feed)
+            .environment(socialStats)
+            .environment(router)
         }
     }
 
@@ -186,4 +232,6 @@ struct ContentView: View {
         .environment(AuthManager())
         .environment(SyncEngine())
         .environment(SocialGraph())
+        .environment(ChatStore())
+        .environment(SocialDemoMode.shared)
 }

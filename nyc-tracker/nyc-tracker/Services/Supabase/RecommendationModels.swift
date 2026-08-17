@@ -286,7 +286,7 @@ struct WishlistEntry: Decodable, Identifiable, Hashable, Sendable {
 /// returns the same columns as `visits_in_bounds` with one extra, and keeping
 /// them structurally identical means the feed card and the place sheet render
 /// from the same type.
-struct FeedItem: Decodable, Identifiable, Sendable {
+struct FeedItem: Decodable, Identifiable, Hashable, Sendable {
     var visit: FriendVisit
     /// Distinct friends who have been to this place — not visit count. One
     /// friend who goes weekly is one friend.

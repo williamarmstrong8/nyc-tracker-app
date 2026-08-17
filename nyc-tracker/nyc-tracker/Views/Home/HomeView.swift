@@ -1,5 +1,4 @@
 import SwiftUI
-import MapKit
 
 enum HomeMode: String, CaseIterable, Identifiable {
     case map
@@ -18,7 +17,6 @@ struct HomeView: View {
 
     @State private var showSearch = false
     @State private var listPath = NavigationPath()
-    @Namespace private var mapScope
 
     /// Hide the floating toggle/filter/search row once the list has drilled into a category —
     /// it would otherwise sit on top of that screen's title and back button.
@@ -35,8 +33,7 @@ struct HomeView: View {
                         userID: userID,
                         openedVisit: $openedVisit,
                         focusVisitID: $focusVisitID,
-                        filter: filter,
-                        mapScope: mapScope
+                        filter: filter
                     )
                     .ignoresSafeArea()
                 case .list:
@@ -47,60 +44,32 @@ struct HomeView: View {
             // Unobtrusive, and only present when there is something to say —
             // pending uploads, a failure, or a legacy migration in progress.
             SyncStatusBar()
-                // Clears the audience row too when the map is showing, which
-                // adds a second row of floating controls above it.
-                .padding(.top, showFloatingControls ? (mode == .map ? 126 : 80) : 20)
+                .padding(.top, showFloatingControls ? 68 : 20)
                 .allowsHitTesting(true)
 
             if showFloatingControls {
-                VStack(spacing: 10) {
-                    ZStack {
-                        HomeModeToggle(mode: $mode)
-                        HStack {
-                            FilterButton(filter: filter)
-                            Spacer()
-                            SearchButton { showSearch = true }
-                        }
-                        .padding(.horizontal, 16)
+                ZStack {
+                    HomeModeToggle(mode: $mode)
+                    HStack {
+                        FilterButton(filter: filter, showsAudience: mode == .map)
+                        Spacer()
+                        SearchButton { showSearch = true }
                     }
-
-                    // Its own row rather than squeezed alongside the toggle: the
-                    // label is variable-width (it can be a friend's name) and
-                    // would push the centred toggle off-centre as it changed.
-                    // Map only — the list is always the user's own entries.
-                    if mode == .map {
-                        HStack {
-                            MapAudienceControl()
-                            Spacer()
-                        }
-                        .padding(.horizontal, 16)
-                    }
+                    .padding(.horizontal, 16)
                 }
-                .padding(.top, 20)
+                // Matches the vertical offset of the toolbar buttons on every
+                // other tab (Explore/Friends/Profile), which sit inside a
+                // compact inline nav bar right at the safe-area line rather
+                // than 20pt below it.
+                .padding(.top, 8)
                 .transition(.opacity)
-            }
-
-            if mode == .map {
-                HStack {
-                    Spacer()
-                    VStack(spacing: 12) {
-                        MapUserLocationButton(scope: mapScope)
-                            .buttonBorderShape(.circle)
-                            .controlSize(.regular)
-                        MapCompass(scope: mapScope)
-                            .mapControlVisibility(.visible)
-                    }
-                }
-                // Clear the toggle/filter/search row above (20pt top inset + 52pt row + gap)
-                // so the user-location button doesn't sit on top of the search button.
-                .padding(.top, 84)
-                .padding(.trailing, 16)
             }
         }
         .animation(.default, value: showFloatingControls)
-        .mapScope(mapScope)
         .sheet(isPresented: $showSearch) {
             SearchVisitsView(userID: userID, openedVisit: $openedVisit)
+                .preferredColorScheme(.dark)
+                .presentationBackground(.black)
         }
     }
 }
@@ -152,13 +121,55 @@ struct HomeModeToggle: View {
 
 private struct FilterButton: View {
     @Bindable var filter: EntryFilter
+    /// Audience belongs on the map only — the list is always the user's own entries.
+    var showsAudience: Bool
+
+    @Environment(MapAudienceStore.self) private var audience
+    @Environment(SocialGraph.self) private var graph
+
+    @State private var showAudiencePicker = false
 
     /// A curated list of tags to offer. In practice these are drawn from `VenueTag`, but presented
     /// as their raw values so they line up with what enrichment writes to `Visit.tags`.
     private let offeredTags: [String] = VenueTag.allCases.map(\.rawValue)
 
+    private var isAudienceFiltered: Bool {
+        showsAudience && audience.audience != .mine
+    }
+
+    private var isActive: Bool { filter.isActive || isAudienceFiltered }
+
     var body: some View {
         Menu {
+            if showsAudience {
+                Section("Show") {
+                    Button {
+                        Haptics.tap()
+                        audience.select(.mine)
+                    } label: {
+                        Label("My places", systemImage: audience.audience == .mine ? "checkmark" : "person.fill")
+                    }
+                    Button {
+                        Haptics.tap()
+                        audience.select(.allFriends)
+                    } label: {
+                        Label("Friends", systemImage: audience.audience == .allFriends ? "checkmark" : "person.2.fill")
+                    }
+                    .disabled(graph.friends.isEmpty)
+                    if !graph.friends.isEmpty {
+                        Button {
+                            Haptics.tap()
+                            // Menu dismissal races a same-turn sheet present;
+                            // hop a turn so the picker actually appears.
+                            Task { @MainActor in
+                                showAudiencePicker = true
+                            }
+                        } label: {
+                            Label(oneFriendLabel, systemImage: isOneFriendSelected ? "checkmark" : "person.crop.circle")
+                        }
+                    }
+                }
+            }
             Section("Kind") {
                 ForEach(VisitKind.allCases) { kind in
                     Button {
@@ -186,24 +197,42 @@ private struct FilterButton: View {
                     }
                 }
             }
-            if filter.isActive {
+            if isActive {
                 Section {
                     Button(role: .destructive) {
                         Haptics.tap()
                         filter.reset()
+                        if showsAudience { audience.select(.mine) }
                     } label: {
                         Label("Clear filters", systemImage: "xmark.circle")
                     }
                 }
             }
         } label: {
-            Image(systemName: filter.isActive ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease")
+            Image(systemName: isActive ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease")
                 .font(.subheadline.weight(.semibold))
                 .frame(width: 36, height: 36)
         }
         .buttonStyle(.glass)
         .buttonBorderShape(.circle)
         .accessibilityLabel("Filter entries")
+        .sheet(isPresented: $showAudiencePicker) {
+            MapAudiencePicker()
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
+        }
+    }
+
+    private var isOneFriendSelected: Bool {
+        if case .friend = audience.audience { return true }
+        return false
+    }
+
+    private var oneFriendLabel: String {
+        if case .friend(let id) = audience.audience {
+            return graph.friend(withID: id)?.person.shortName ?? "One friend"
+        }
+        return "One friend"
     }
 
     private func toggle(kind: VisitKind) {

@@ -83,13 +83,26 @@ final class AuthManager {
         authStateTask = Task { [weak self] in
             guard let self else { return }
 
-            // `authStateChanges` is an async-get property in supabase-swift 2.x.
-            for await (event, session) in await client.auth.authStateChanges {
+            // `authStateChanges` was an async-get property in earlier 2.x
+            // releases and is a plain one now — hence no `await` on the
+            // property itself, only on the sequence it hands back.
+            for await (event, session) in client.auth.authStateChanges {
                 if Task.isCancelled { return }
 
                 switch event {
                 case .initialSession, .signedIn, .tokenRefreshed, .userUpdated:
                     if let session {
+                        // Deliberately no `session.isExpired` branch, despite
+                        // the SDK's advice for `emitLocalSessionAsInitialSession`.
+                        // That advice is aimed at apps that treat "a session
+                        // exists" as "signed in" — this one doesn't. Nothing here
+                        // enters `.signedIn` until the profile row has actually
+                        // been read, and that read goes through
+                        // `auth.session.accessToken`, which refreshes an expired
+                        // token before the request leaves. So an expired session
+                        // resolves exactly like a valid one, one refresh later,
+                        // and a dead refresh token fails the read and then
+                        // arrives here again as `.signedOut`.
                         await self.resolveProfile(for: session.user.id)
                     } else {
                         // `.initialSession` with a nil session means nothing was

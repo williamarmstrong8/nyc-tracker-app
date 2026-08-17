@@ -2,9 +2,12 @@ import SwiftUI
 import SwiftData
 
 /// Two-level list view:
-///   1. A grid of category cards (Restaurants, Bars, Cafes, Bakeries, Other) showing counts.
-///   2. Tapping a card drills into the visits for that category.
+///   1. A grid of category tiles (Restaurants, Bars, Cafes, Bakeries, Other) showing counts.
+///   2. Tapping a tile drills into the visits for that category.
 /// The active `EntryFilter` still applies to both levels — so kind/tag filters carry through.
+///
+/// Visual language matches Explore and Profile: the photo is the surface,
+/// type sits next to or under it, and nothing is wrapped in a card fill.
 struct ListHome: View {
     let userID: UUID
     @Binding var openedVisit: Visit?
@@ -42,7 +45,7 @@ struct ListHome: View {
     var body: some View {
         NavigationStack(path: $path) {
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 12) {
+                LazyVStack(alignment: .leading, spacing: 28) {
                     // Room for the floating Map|List toggle + filter/search row above.
                     Color.clear.frame(height: 72)
 
@@ -51,12 +54,12 @@ struct ListHome: View {
                             .padding(.top, 40)
                     } else {
                         LazyVGrid(
-                            columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)],
-                            spacing: 12
+                            columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)],
+                            spacing: 22
                         ) {
                             ForEach(orderedCategories, id: \.self) { category in
                                 NavigationLink(value: category) {
-                                    CategoryCard(
+                                    CategoryTile(
                                         category: category,
                                         count: groupedByCategory[category]?.count ?? 0,
                                         previewVisits: groupedByCategory[category] ?? []
@@ -66,11 +69,8 @@ struct ListHome: View {
                             }
                         }
                     }
-
-                    // Room for floating bottom nav
-                    Color.clear.frame(height: 120)
                 }
-                .padding(.horizontal, 16)
+                .padding(.horizontal, 1)
             }
             .background(Color(uiColor: .systemBackground))
             // The manual sync trigger. Pushes anything queued first, then pulls —
@@ -94,9 +94,11 @@ struct ListHome: View {
     }
 }
 
-// MARK: - Category card
+// MARK: - Category tile
 
-private struct CategoryCard: View {
+/// Photo as the surface, name and count as type underneath — the Explore
+/// feed card, shrunk to a two-column grid. No wrapping fill.
+private struct CategoryTile: View {
     let category: PlaceCategory
     let count: Int
     let previewVisits: [Visit]
@@ -109,39 +111,34 @@ private struct CategoryCard: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(tint.gradient.opacity(0.28))
-                if let previewPhoto {
-                    PhotoView(source: PhotoView.Source(photo: previewPhoto, wantsThumbnail: true), contentMode: .fill)
-                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        VStack(alignment: .leading, spacing: 8) {
+            Color.clear
+                .aspectRatio(4 / 3, contentMode: .fit)
+                .overlay {
+                    if let previewPhoto {
+                        PhotoView(source: PhotoView.Source(photo: previewPhoto, wantsThumbnail: true), contentMode: .fill)
+                    } else {
+                        ZStack {
+                            tint.opacity(0.18)
+                            Image(systemName: symbol)
+                                .font(.system(size: 28, weight: .light))
+                                .foregroundStyle(tint)
+                        }
+                    }
                 }
-                Image(systemName: symbol)
-                    .font(.system(size: 30, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .shadow(color: .black.opacity(0.25), radius: 3, y: 1)
-                    .padding(10)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            }
-            .frame(height: 110)
-            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(label)
-                    .font(.headline)
+                    .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.primary)
                     .lineLimit(1)
                 Text("\(count) \(count == 1 ? "place" : "places")")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
+            .padding(.horizontal, 4)
         }
-        .padding(10)
-        .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(Color(uiColor: .secondarySystemBackground).opacity(0.5))
-        )
     }
 
     private var label: String {
@@ -185,10 +182,14 @@ private struct CategoryVisitsList: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(SyncEngine.self) private var sync
 
+    private var listedVisits: [Visit] {
+        visits.filter { $0.place != nil }
+    }
+
     var body: some View {
         ScrollView {
-            LazyVStack(spacing: 12) {
-                if visits.isEmpty {
+            LazyVStack(spacing: 0) {
+                if listedVisits.isEmpty {
                     VStack(spacing: 8) {
                         Image(systemName: "tray")
                             .font(.system(size: 40, weight: .light))
@@ -200,7 +201,7 @@ private struct CategoryVisitsList: View {
                     .padding(.top, 60)
                 }
 
-                ForEach(visits) { visit in
+                ForEach(Array(listedVisits.enumerated()), id: \.element.id) { index, visit in
                     if let place = visit.place {
                         Button {
                             Haptics.tap()
@@ -220,12 +221,14 @@ private struct CategoryVisitsList: View {
                                 Label("Delete", systemImage: "trash")
                             }
                         }
+
+                        if index < listedVisits.count - 1 {
+                            Divider().padding(.leading, 86)
+                        }
                     }
                 }
-
-                Color.clear.frame(height: 120) // clear the floating bottom nav
             }
-            .padding(.horizontal, 16)
+            .padding(.horizontal, 10)
             .padding(.top, 8)
         }
         .background(Color(uiColor: .systemBackground))
@@ -259,57 +262,34 @@ private struct ListRow: View {
 
     var body: some View {
         HStack(alignment: .center, spacing: 14) {
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Color(uiColor: .secondarySystemBackground))
+            thumbnailView
                 .frame(width: 64, height: 64)
-                .overlay {
-                    if let thumbnail {
-                        PhotoView(source: PhotoView.Source(photo: thumbnail, wantsThumbnail: true), contentMode: .fill)
-                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                    } else if visit.kind == .wantToTry {
-                        Image(systemName: "bookmark.fill")
-                            .font(.system(size: 22))
-                            .foregroundStyle(.blue.opacity(0.8))
-                    } else {
-                        Image(systemName: "photo")
-                            .font(.system(size: 22))
-                            .foregroundStyle(.tertiary)
-                    }
-                }
                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 6) {
-                    Text(visit.title.isEmpty ? place.name : visit.title)
-                        .font(.headline)
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
+                .overlay {
                     if visit.kind == .wantToTry {
-                        Text("Want to try")
-                            .font(.caption2.weight(.semibold))
-                            .foregroundStyle(.blue)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Capsule().fill(Color.blue.opacity(0.15)))
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .strokeBorder(Color.blue, lineWidth: 2.5)
                     }
                 }
 
-                Text(place.neighborhood)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(visit.title.isEmpty ? place.name : visit.title)
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(.primary)
                     .lineLimit(1)
 
+                if !place.neighborhood.isEmpty {
+                    Text(place.neighborhood)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+
                 if !visit.tags.isEmpty {
-                    HStack(spacing: 6) {
-                        ForEach(visit.tags.prefix(3), id: \.self) { tag in
-                            Text(tag)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 3)
-                                .background(Capsule().fill(Color(uiColor: .tertiarySystemFill)))
-                        }
-                    }
+                    Text(visit.tags.prefix(3).joined(separator: " · "))
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
                 }
             }
 
@@ -319,11 +299,23 @@ private struct ListRow: View {
                 .font(.footnote.weight(.semibold))
                 .foregroundStyle(.tertiary)
         }
-        .padding(12)
-        .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(Color(uiColor: .secondarySystemBackground).opacity(0.4))
-        )
+        .padding(.vertical, 12)
+        .contentShape(Rectangle())
+        .accessibilityValue(visit.kind == .wantToTry ? "Want to try" : "")
+    }
+
+    @ViewBuilder
+    private var thumbnailView: some View {
+        if let thumbnail {
+            PhotoView(source: PhotoView.Source(photo: thumbnail, wantsThumbnail: true), contentMode: .fill)
+        } else {
+            ZStack {
+                Color(uiColor: .secondarySystemFill)
+                Image(systemName: visit.kind == .wantToTry ? "bookmark" : "photo")
+                    .font(.system(size: 22, weight: .light))
+                    .foregroundStyle(.tertiary)
+            }
+        }
     }
 }
 

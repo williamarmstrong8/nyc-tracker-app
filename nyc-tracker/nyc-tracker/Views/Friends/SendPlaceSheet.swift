@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Send a place to friends: multi-select, searchable, one optional message.
+/// Send a place to friends: multi-select, searchable, one message.
 ///
 /// Multi-select because the real gesture is "everyone who'd like this", not
 /// "one person at a time" — recommending a great spot to five people should be
@@ -12,6 +12,9 @@ import SwiftUI
 /// is the same for everyone.
 struct SendPlaceSheet: View {
     let place: PlaceSummary
+    /// The place's photo, if the caller already has one on screen — shown as
+    /// an image card up top instead of a bare category icon.
+    var photo: PhotoView.Source? = nil
 
     @Environment(SocialGraph.self) private var graph
     @Environment(SocialStatsCache.self) private var stats
@@ -32,6 +35,14 @@ struct SendPlaceSheet: View {
         }
     }
 
+    private var trimmedMessage: String {
+        message.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var canSend: Bool {
+        !selected.isEmpty && !trimmedMessage.isEmpty && !isSending
+    }
+
     var body: some View {
         NavigationStack {
             Group {
@@ -43,8 +54,11 @@ struct SendPlaceSheet: View {
                     picker
                 }
             }
+            .background(Color.black)
             .navigationTitle(results == nil ? "Send to friends" : "Sent")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbarBackground(.black, for: .navigationBar)
+            .toolbarBackgroundVisibility(.visible, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button(results == nil ? "Cancel" : "Done") { dismiss() }
@@ -57,14 +71,17 @@ struct SendPlaceSheet: View {
                             if isSending {
                                 ProgressView().controlSize(.small)
                             } else {
-                                Text("Send")
+                                Text("Send").fontWeight(.semibold)
                             }
                         }
-                        .disabled(selected.isEmpty || isSending)
+                        .disabled(!canSend)
+                        .tint(.blue)
                     }
                 }
             }
         }
+        .preferredColorScheme(.dark)
+        .presentationBackground(.black)
     }
 
     // MARK: - Picker
@@ -73,27 +90,49 @@ struct SendPlaceSheet: View {
         List {
             Section {
                 placeHeader
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
+                    .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
             }
 
-            Section("Message (optional)") {
-                TextField("Why they'd like it…", text: $message, axis: .vertical)
-                    .lineLimit(1...4)
-                    // Matches the `recommendations_message_length` CHECK. The DB
-                    // is the guarantee; this stops the user writing 600
-                    // characters and only finding out on submit.
-                    .onChange(of: message) { _, new in
-                        if new.count > 500 { message = String(new.prefix(500)) }
-                    }
+            // The message field only shows up once there's someone to send it
+            // to — an empty text box above an empty friend list is a form with
+            // nothing to do yet.
+            if !selected.isEmpty {
+                Section("Message") {
+                    TextField("Why they'd like it…", text: $message, axis: .vertical)
+                        .lineLimit(1...4)
+                        // Matches the `recommendations_message_length` CHECK. The DB
+                        // is the guarantee; this stops the user writing 600
+                        // characters and only finding out on submit.
+                        .onChange(of: message) { _, new in
+                            if new.count > 500 { message = String(new.prefix(500)) }
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 12)
+                        .background(
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .fill(Color(uiColor: .secondarySystemBackground))
+                        )
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(Color.clear)
+                }
+                .transition(.opacity.combined(with: .move(edge: .top)))
             }
 
             Section {
                 ForEach(filteredFriends) { edge in
                     friendRow(edge)
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(Color.clear)
+                        .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
                 }
                 if filteredFriends.isEmpty {
                     Text("No friends match \u{201C}\(query)\u{201D}.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(Color.clear)
                 }
             } header: {
                 HStack {
@@ -106,27 +145,52 @@ struct SendPlaceSheet: View {
                 }
             }
         }
-        .listStyle(.insetGrouped)
-        .searchable(text: $query, prompt: "Search friends")
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .listSectionSpacing(20)
+        .background(Color.black)
+        .animation(.default, value: selected.isEmpty)
+        .appSearchable(text: $query, prompt: "Search friends")
     }
 
+    @ViewBuilder
     private var placeHeader: some View {
-        HStack(spacing: 12) {
-            Image(systemName: categorySymbol(place.category))
-                .font(.subheadline)
-                .foregroundStyle(categoryTint(place.category))
-                .frame(width: 40, height: 40)
-                .background(Circle().fill(categoryTint(place.category).opacity(0.15)))
+        VStack(alignment: .leading, spacing: 12) {
+            Color.clear
+                .aspectRatio(4 / 3, contentMode: .fit)
+                .overlay { placeThumbnail }
+                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text(place.name).font(.headline).lineLimit(1)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(place.name)
+                    .font(.title3.weight(.semibold))
+                    .lineLimit(2)
                 if let subtitle = place.subtitle {
-                    Text(subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    Text(subtitle)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
                 }
             }
-            Spacer(minLength: 0)
+            .padding(.horizontal, 4)
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, 4)
+    }
+
+    /// The real photo when the caller has one; otherwise the same
+    /// category-tinted icon used everywhere else a place has no picture yet.
+    @ViewBuilder
+    private var placeThumbnail: some View {
+        if let photo {
+            PhotoView(source: photo, contentMode: .fill)
+        } else {
+            ZStack {
+                categoryTint(place.category).opacity(0.18)
+                Image(systemName: categorySymbol(place.category))
+                    .font(.system(size: 36, weight: .ultraLight))
+                    .foregroundStyle(categoryTint(place.category))
+            }
+        }
     }
 
     private func friendRow(_ edge: FriendshipEdge) -> some View {
@@ -138,15 +202,10 @@ struct SendPlaceSheet: View {
                 selected.insert(edge.userID)
             }
         } label: {
-            HStack(spacing: 12) {
-                PersonAvatar(person: edge.person, size: 40)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(edge.person.bestName).font(.body).lineLimit(1)
-                    if let handle = edge.person.handle {
-                        Text(handle).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                    }
-                }
-                Spacer(minLength: 0)
+            FriendPersonRow(
+                person: edge.person,
+                showsPaletteRing: true
+            ) {
                 Image(systemName: selected.contains(edge.userID)
                       ? "checkmark.circle.fill" : "circle")
                     .font(.title3)
@@ -184,7 +243,7 @@ struct SendPlaceSheet: View {
             let outcome = try await RecommendationService.send(
                 place: place.id,
                 to: Array(selected),
-                message: message
+                message: trimmedMessage
             )
             results = outcome
             Haptics.success()
@@ -249,9 +308,13 @@ private struct SendResultsList: View {
                         .foregroundStyle(tint(for: result.outcome))
                 }
                 .padding(.vertical, 2)
+                .listRowSeparator(.hidden)
+                .listRowBackground(Color.clear)
             }
         }
-        .listStyle(.insetGrouped)
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .background(Color.black)
     }
 
     private func caption(for outcome: RecommendationOutcome, name: String) -> String {

@@ -194,6 +194,21 @@ struct FindOrCreatePlaceParams: Encodable, Sendable {
     }
 }
 
+/// Argument list for the `update_place_category` RPC.
+///
+/// Separate from `find_or_create_place`: that function only ever fills in a
+/// null `category`, so correcting an already-set one (e.g. a MapKit
+/// restaurant mislabeled as a cafe) needs its own explicit write path.
+struct UpdatePlaceCategoryParams: Encodable, Sendable {
+    var placeID: UUID
+    var category: String
+
+    enum CodingKeys: String, CodingKey {
+        case placeID  = "p_place_id"
+        case category = "p_category"
+    }
+}
+
 // MARK: - Visit
 
 struct RemoteVisit: Codable, Identifiable, Hashable, Sendable {

@@ -35,7 +35,24 @@ enum SupabaseManager {
                     // Session persistence is the default and uses the Keychain on
                     // Apple platforms, which is what lets a session survive both a
                     // force-quit and (usually) an app reinstall.
-                    autoRefreshToken: true
+                    autoRefreshToken: true,
+                    // Opt in to the emission order that becomes the default in
+                    // supabase-swift 3: `.initialSession` fires with whatever is
+                    // in the Keychain, immediately, and a refresh happens behind
+                    // it. The legacy order waits for that refresh before saying
+                    // anything, which costs a network round trip on every cold
+                    // launch before the splash can resolve.
+                    //
+                    // Not opting in is not free: the SDK calls `reportIssue`
+                    // about it on every launch, and `reportIssue` raises SIGTRAP
+                    // when a debugger is attached — so the legacy default traps
+                    // the process during launch on every debug run.
+                    //
+                    // `AuthManager` needs no `isExpired` branch to go with this.
+                    // See the note there: it opts users in on a successful
+                    // profile read, not on the presence of a session, and that
+                    // read is what forces the refresh.
+                    emitLocalSessionAsInitialSession: true
                 )
             )
         )

@@ -3,9 +3,9 @@ import Observation
 
 /// The signed-in user's friend graph, as observable state.
 ///
-/// One source of truth for the friends list, both request queues, and the inbox
-/// badge — all of which come from a single `friendship_edges()` call, because
-/// they are always displayed together and splitting them would be four requests
+/// One source of truth for the friends list and both request queues,
+/// which come from a single `friendship_edges()` call because they are
+/// always displayed together and splitting them would be extra requests
 /// over the same index.
 ///
 /// ## What this deliberately is not
@@ -45,10 +45,8 @@ final class SocialGraph {
 
     /// Place recommendations sent to me, dismissed ones excluded.
     ///
-    /// Lives here rather than in its own store because the inbox has to have one
-    /// owner. Two stores would mean two refreshes, two loading flags, and a
-    /// badge that sums values which were fetched at different moments — so it
-    /// would occasionally disagree with the list it is counting.
+    /// Lives here rather than in its own store so friend-profile shared counts
+    /// and a full reload stay on one refresh.
     private(set) var recommendations: [InboxRecommendation] = []
 
     private(set) var isLoading = false
@@ -71,19 +69,6 @@ final class SocialGraph {
     /// User IDs of accepted friends. This is what the map's "all friends" mode
     /// filters on, and what an unfriend has to remove.
     var friendIDs: [UUID] { friends.map(\.userID) }
-
-    /// Recommendations the user hasn't seen yet.
-    var unreadRecommendationCount: Int {
-        recommendations.filter(\.isUnread).count
-    }
-
-    /// The badge on the inbox tab.
-    ///
-    /// The sum the last task's comment promised. Only things awaiting the user's
-    /// attention count: incoming friend requests and unread recommendations. A
-    /// request the user sent, or a recommendation they have already read but not
-    /// dismissed, is not a task on their list.
-    var inboxBadgeCount: Int { incoming.count + unreadRecommendationCount }
 
     /// The signed-in user, once configured.
     var currentUserID: UUID? { userID }

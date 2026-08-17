@@ -204,6 +204,7 @@ final class SyncEngine {
         // round trips and a row that briefly exists for no reason.
         await drainDeletions(userID: userID)
         await pushPendingVisits(userID: userID)
+        await pushPendingCategoryCorrections(userID: userID)
         await pull(userID: userID)
     }
 
@@ -225,6 +226,44 @@ final class SyncEngine {
             guard !needsReauthentication else { return }
             await upload(visit)
         }
+    }
+
+    /// Push user-corrected categories for places that already synced.
+    ///
+    /// `find_or_create_place()` only ever fills in a null `category` — it never
+    /// overwrites one that's already set (see 0300_places.sql) — so a
+    /// correction made after the fact (Apple mislabeled a restaurant as a
+    /// cafe) needs its own explicit RPC rather than riding along on the next
+    /// visit upsert.
+    private func pushPendingCategoryCorrections(userID: UUID) async {
+        guard let context else { return }
+
+        let places = (try? context.fetch(Self.pendingCategoryUpdatesDescriptor(for: userID))) ?? []
+        for place in places {
+            if Task.isCancelled { return }
+            guard !needsReauthentication else { return }
+            guard let remotePlaceID = place.remotePlaceID else {
+                // Hasn't synced yet — its first upload already carries the
+                // corrected value, so there's nothing left to push.
+                place.categorySyncPending = false
+                continue
+            }
+
+            do {
+                let params = UpdatePlaceCategoryParams(placeID: remotePlaceID, category: place.category.rawValue)
+                try await client.rpc("update_place_category", params: params).execute()
+                place.categorySyncPending = false
+            } catch {
+                if case .authExpired = SyncFailure.classify(error) {
+                    try? context.save()
+                    Task { await handleAuthExpiry() }
+                    return
+                }
+                // Left pending — the next sync pass (retry timer, foreground,
+                // network return) will simply try again.
+            }
+        }
+        try? context.save()
     }
 
     /// The upload pipeline for one visit.
@@ -984,6 +1023,15 @@ final class SyncEngine {
                 visit.ownerUserID == owner && visit.syncStateRaw == pending
             },
             sortBy: [SortDescriptor(\.createdAt)]
+        )
+    }
+
+    private static func pendingCategoryUpdatesDescriptor(for userID: UUID) -> FetchDescriptor<Place> {
+        let owner: UUID? = userID
+        return FetchDescriptor<Place>(
+            predicate: #Predicate<Place> { place in
+                place.ownerUserID == owner && place.categorySyncPending
+            }
         )
     }
 

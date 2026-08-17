@@ -145,10 +145,12 @@ final class FriendVisitCache {
     private func fetch(bounds: GeoBounds, audience: MapAudience) async {
         // Fail fast and specifically rather than waiting out a URLSession
         // timeout to produce a vaguer message.
-        guard NetworkMonitor.shared.isReachable else {
-            failure = .offline
-            isLoading = false
-            return
+        if !SocialDemoMode.shared.isEnabled {
+            guard NetworkMonitor.shared.isReachable else {
+                failure = .offline
+                isLoading = false
+                return
+            }
         }
 
         let target = bounds.expanded(by: overfetchFraction)

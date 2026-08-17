@@ -18,6 +18,7 @@ struct PhotoCarousel: View {
                         ForEach(0..<sources.count, id: \.self) { index in
                             PhotoView(source: sources[index], contentMode: .fill)
                                 .containerRelativeFrame(.horizontal)
+                                .frame(maxHeight: .infinity)
                                 .clipped()
                                 .id(index)
                         }

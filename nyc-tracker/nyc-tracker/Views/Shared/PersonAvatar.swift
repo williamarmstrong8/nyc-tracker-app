@@ -127,18 +127,19 @@ struct PersonAvatar: View {
 /// prefixed with `@` and sometimes not.
 struct PersonLabel: View {
     let person: PersonSummary
-    var nameFont: Font = .headline
+    var nameFont: Font = .body.weight(.semibold)
+    var handleFont: Font = .subheadline
     var lineLimit: Int = 1
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 3) {
             Text(person.bestName)
                 .font(nameFont)
                 .foregroundStyle(.primary)
                 .lineLimit(lineLimit)
             if let handle = person.handle {
                 Text(handle)
-                    .font(.subheadline)
+                    .font(handleFont)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }

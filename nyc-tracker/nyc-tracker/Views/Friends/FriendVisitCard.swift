@@ -5,7 +5,8 @@ import SwiftUI
 /// Shared by the friend profile list and the place detail sheet, because those
 /// two surfaces show the same thing from different directions — "everything this
 /// person logged" vs "everything logged at this place" — and the card in the
-/// middle is identical.
+/// middle is identical. Photo and type float on the page; there is no wrapping
+/// fill.
 ///
 /// Everything on it is world-readable: transcript, summary, pull quote, tags,
 /// photos. There is no redaction path and no permission branch, which is the
@@ -23,38 +24,31 @@ struct FriendVisitCard: View {
     @State private var showTranscript = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            if showsAuthor { authorRow }
+        VStack(alignment: .leading, spacing: 10) {
+            if showsAuthor {
+                authorRow
+                    .padding(.horizontal, 10)
+            }
             if !visit.photos.isEmpty { photoStrip }
-            headlineRow
-            metaRow
-            if !visit.tags.isEmpty { tagRow }
-            if let summary = nonEmpty(visit.summary) {
-                Text(summary)
-                    .font(.subheadline)
-                    .foregroundStyle(.primary)
+            VStack(alignment: .leading, spacing: 12) {
+                headlineRow
+                metaRow
+                if !visit.tags.isEmpty { tagRow }
+                if let summary = nonEmpty(visit.summary) {
+                    Text(summary)
+                        .font(.subheadline)
+                        .foregroundStyle(.primary)
+                }
+                if let quote = nonEmpty(visit.topQuote) {
+                    pullQuote(quote)
+                }
+                if let transcript = nonEmpty(visit.transcript) {
+                    transcriptDisclosure(transcript)
+                }
             }
-            if let quote = nonEmpty(visit.topQuote) {
-                pullQuote(quote)
-            }
-            if let transcript = nonEmpty(visit.transcript) {
-                transcriptDisclosure(transcript)
-            }
+            .padding(.horizontal, 10)
         }
-        .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(Color(uiColor: .secondarySystemGroupedBackground))
-        )
-        .overlay {
-            // A quiet accent border rather than a badge: it marks the card as
-            // yours without competing with the content for attention.
-            if isOwnVisit {
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .strokeBorder(Color.accentColor.opacity(0.55), lineWidth: 1.5)
-            }
-        }
     }
 
     // MARK: - Pieces
@@ -83,16 +77,18 @@ struct FriendVisitCard: View {
     }
 
     /// Horizontal strip rather than a paged carousel: these cards stack in a
-    /// scroll view, and a nested paging view swallows the vertical drag.
+    /// scroll view under a hero photo, and a nested paging view swallows the
+    /// vertical drag. Rounded photos, no wrapping fill.
     private var photoStrip: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
                 ForEach(visit.photos) { photo in
-                    PhotoView(source: .remote(path: photo.smallestPath), contentMode: .fill)
-                        .frame(width: 150, height: 150)
-                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    PhotoView(source: .friendPhoto(path: photo.smallestPath), contentMode: .fill)
+                        .frame(width: 168, height: 168)
+                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                 }
             }
+            .padding(.horizontal, 10)
         }
     }
 
@@ -188,64 +184,28 @@ struct FriendVisitCard: View {
     }
 }
 
-/// Minimal wrapping layout for tag chips.
-///
-/// SwiftUI has no built-in wrapping stack, and the alternatives are worse: a
-/// `LazyVGrid` with fixed columns can't size to text, and a horizontal
-/// `ScrollView` hides content behind a gesture nobody discovers inside a card.
-struct FlowLayout: Layout {
-    var spacing: CGFloat = 6
+/// One friend's visit, without the place chrome (save/send, "who's been here",
+/// your own entries). Used from a friend's profile and a single-friend map pin.
+struct FriendVisitDetailSheet: View {
+    let visit: FriendVisit
 
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        let maxWidth = proposal.width ?? .infinity
-        var rows: CGFloat = 1
-        var x: CGFloat = 0
-        var rowHeight: CGFloat = 0
-        var totalHeight: CGFloat = 0
+    @Environment(\.dismiss) private var dismiss
 
-        for subview in subviews {
-            let size = subview.sizeThatFits(.unspecified)
-            if x > 0 && x + size.width > maxWidth {
-                totalHeight += rowHeight + spacing
-                rows += 1
-                x = 0
-                rowHeight = 0
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                FriendVisitCard(visit: visit, showsAuthor: true)
+                    .padding(.vertical, 16)
             }
-            x += size.width + spacing
-            rowHeight = max(rowHeight, size.height)
-        }
-        totalHeight += rowHeight
-
-        return CGSize(
-            width: proposal.width ?? x,
-            height: totalHeight
-        )
-    }
-
-    func placeSubviews(
-        in bounds: CGRect,
-        proposal: ProposedViewSize,
-        subviews: Subviews,
-        cache: inout ()
-    ) {
-        var x = bounds.minX
-        var y = bounds.minY
-        var rowHeight: CGFloat = 0
-
-        for subview in subviews {
-            let size = subview.sizeThatFits(.unspecified)
-            if x > bounds.minX && x + size.width > bounds.maxX {
-                x = bounds.minX
-                y += rowHeight + spacing
-                rowHeight = 0
+            .background(Color(uiColor: .systemBackground))
+            .navigationTitle(visit.placeName)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
             }
-            subview.place(
-                at: CGPoint(x: x, y: y),
-                anchor: .topLeading,
-                proposal: ProposedViewSize(size)
-            )
-            x += size.width + spacing
-            rowHeight = max(rowHeight, size.height)
         }
+        .presentationDragIndicator(.visible)
     }
 }

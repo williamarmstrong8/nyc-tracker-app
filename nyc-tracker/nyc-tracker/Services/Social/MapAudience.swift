@@ -12,9 +12,9 @@ import Observation
 enum MapAudience: Hashable, Sendable {
     /// Only the signed-in user's visits. The only mode that works offline.
     case mine
-    /// Every accepted friend, plus the user's own visits underneath.
+    /// Every accepted friend's visits — not the signed-in user's.
     case allFriends
-    /// One specific friend, plus the user's own visits underneath.
+    /// One specific friend's visits — not the signed-in user's.
     case friend(UUID)
 
     /// True when this mode needs the network. Drives the offline notice: the

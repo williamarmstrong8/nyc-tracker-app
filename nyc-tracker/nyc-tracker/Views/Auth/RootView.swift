@@ -11,6 +11,7 @@ struct RootView: View {
     @Environment(AuthManager.self) private var auth
     @Environment(SyncEngine.self) private var sync
     @Environment(SocialGraph.self) private var social
+    @Environment(ChatStore.self) private var chat
     @Environment(\.modelContext) private var modelContext
 
     var body: some View {
@@ -59,6 +60,11 @@ struct RootView: View {
                 // written to the user-scoped SwiftData store, so there is nothing
                 // there to clean up.
                 social.teardown()
+                // Messages are the one social surface with an open socket, so
+                // this teardown does more than drop state: it unsubscribes. A
+                // channel left running would keep delivering the previous
+                // account's messages into the next one's session.
+                chat.teardown()
                 PhotoCache.shared.clear()
             }
         }

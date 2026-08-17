@@ -1,21 +1,23 @@
 import SwiftUI
 
-/// Find people by handle or display name.
+/// Find people by handle or display name, or manage friend requests when the
+/// search field is empty.
 ///
-/// The relationship state on each row comes back with the search results in one
-/// query — `search_profiles` LEFT JOINs the friendship pair index — rather than
-/// one lookup per row. It is then kept live by deriving it from `SocialGraph`,
-/// so tapping Add on a row updates that row (and every other surface showing
-/// that person) off a single refetch of the edges.
+/// The relationship state on each search row comes back with the results in
+/// one query — `search_profiles` LEFT JOINs the friendship pair index —
+/// rather than one lookup per row. It is then kept live by deriving it from
+/// `SocialGraph`, so tapping Add on a row updates that row (and every other
+/// surface showing that person) off a single refetch of the edges.
 ///
-/// Owns its own `NavigationStack` so it can be presented as a sheet from
-/// anywhere without every caller remembering to wrap it.
+/// The search field lives on the parent `AddFriendsView` nav bar (same
+/// `appSearchable` as the map search sheet); this view owns the results
+/// list. Rows here are identity + action only — no profile push, so
+/// accept/decline stay unambiguous tap targets.
 struct UserSearchView: View {
-    @Environment(SocialGraph.self) private var graph
-    @Environment(\.dismiss) private var dismiss
+    @Binding var query: String
 
-    @State private var path = NavigationPath()
-    @State private var query = ""
+    @Environment(SocialGraph.self) private var graph
+
     @State private var results: [ProfileSearchResult] = []
     @State private var isSearching = false
     @State private var searchFailed = false
@@ -27,102 +29,106 @@ struct UserSearchView: View {
         query.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private var incoming: [FriendshipEdge] {
+        graph.incoming.sorted { ($0.createdAt ?? .distantPast) > ($1.createdAt ?? .distantPast) }
+    }
+
+    private var outgoing: [FriendshipEdge] {
+        graph.outgoing.sorted { ($0.createdAt ?? .distantPast) > ($1.createdAt ?? .distantPast) }
+    }
+
     var body: some View {
-        NavigationStack(path: $path) {
-            List {
-                if trimmedQuery.isEmpty {
-                    promptSection
-                } else if results.isEmpty && !isSearching {
-                    noResultsSection
-                } else {
-                    ForEach(results) { result in
-                        row(for: result)
-                    }
+        List {
+            if trimmedQuery.isEmpty {
+                requestsContent
+            } else if results.isEmpty && !isSearching {
+                noResultsSection
+            } else {
+                ForEach(results) { result in
+                    row(for: result)
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
+                        .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
                 }
             }
-            .listStyle(.insetGrouped)
-            .searchable(text: $query, prompt: "Name or username")
-            .autocorrectionDisabled()
-            .textInputAutocapitalization(.never)
-            .navigationTitle("Find people")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }
-                }
-            }
-            .overlay {
-                if isSearching && results.isEmpty {
-                    ProgressView()
-                }
-            }
-            .navigationDestination(for: PersonSummary.self) { person in
-                FriendProfileView(person: person)
+        }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .scrollDismissesKeyboard(.immediately)
+        .overlay {
+            if isSearching && results.isEmpty && !trimmedQuery.isEmpty {
+                ProgressView()
             }
         }
         // Debounced so a fast typist produces one query, not one per keystroke.
         .onChange(of: query) { _, newValue in
             scheduleSearch(for: newValue)
         }
+        .task { graph.refresh() }
+        .refreshable { await graph.reload() }
         .onDisappear { searchTask?.cancel() }
     }
 
-    // MARK: - Rows
+    // MARK: - Requests (shown when the search field is empty)
 
-    /// Two independent controls rather than a `NavigationLink` wrapping the
-    /// action button. A button inside a link's label fights the link's gesture
-    /// and the wrong one usually wins; splitting them makes the tap targets
-    /// unambiguous — the person opens their profile, the button acts on the
-    /// relationship.
-    private func row(for result: ProfileSearchResult) -> some View {
-        let snapshot = graph.snapshot(
-            for: result.id,
-            fallback: result.relationship,
-            fallbackFriendshipID: result.friendshipID
-        )
-
-        return HStack(spacing: 12) {
-            Button {
-                path.append(result.person)
-            } label: {
-                HStack(spacing: 12) {
-                    PersonAvatar(person: result.person, size: 44)
-                    VStack(alignment: .leading, spacing: 2) {
-                        PersonLabel(person: result.person)
-                        if let bio = result.bio, !bio.isEmpty {
-                            Text(bio)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                        }
+    @ViewBuilder
+    private var requestsContent: some View {
+        if incoming.isEmpty && outgoing.isEmpty {
+            emptyRequestsSection
+        } else {
+            if !incoming.isEmpty {
+                Section("Incoming") {
+                    ForEach(incoming) { edge in
+                        requestRow(edge: edge, relationship: .incoming)
+                            .listRowBackground(Color.clear)
+                            .listRowSeparator(.hidden)
+                            .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
                     }
-                    Spacer(minLength: 0)
                 }
-                .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
-            .accessibilityHint("Opens \(result.person.bestName)'s profile")
-
-            RelationshipButton(
-                person: result.person,
-                relationship: snapshot.state,
-                isBusy: busyPersonID == result.id
-            ) { action in
-                handle(action, person: result.person, friendshipID: snapshot.friendshipID)
+            if !outgoing.isEmpty {
+                Section("Sent") {
+                    ForEach(outgoing) { edge in
+                        requestRow(edge: edge, relationship: .outgoing)
+                            .listRowBackground(Color.clear)
+                            .listRowSeparator(.hidden)
+                            .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
+                    }
+                }
             }
         }
-        .padding(.vertical, 4)
     }
 
-    private var promptSection: some View {
+    /// No custom subtitle — the section header already says "Incoming" or
+    /// "Sent", so the row itself just shows who, via `FriendPersonRow`'s
+    /// default fallback to the person's @handle.
+    private func requestRow(
+        edge: FriendshipEdge,
+        relationship: RelationshipState
+    ) -> some View {
+        HStack(alignment: .center, spacing: 12) {
+            FriendPersonRow(person: edge.person)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            RelationshipButton(
+                person: edge.person,
+                relationship: relationship,
+                isBusy: busyPersonID == edge.userID
+            ) { action in
+                handle(action, person: edge.person, friendshipID: edge.friendshipID)
+            }
+        }
+    }
+
+    private var emptyRequestsSection: some View {
         Section {
             VStack(spacing: 10) {
-                Image(systemName: "magnifyingglass")
+                Image(systemName: "person.crop.circle.badge.questionmark")
                     .font(.system(size: 34, weight: .light))
                     .foregroundStyle(.secondary)
-                Text("Search for people")
+                Text("No requests")
                     .font(.headline)
-                Text("Find friends by their username or name.")
+                Text("Search to find friends. Sent and received requests show up here.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -133,22 +139,44 @@ struct UserSearchView: View {
         }
     }
 
-    private var noResultsSection: some View {
-        Section {
-            VStack(spacing: 6) {
-                Text(searchFailed ? "Couldn't search" : "No one found")
-                    .font(.headline)
-                Text(searchFailed
-                     ? "Check your connection and try again."
-                     : "No usernames or names match \u{201C}\(trimmedQuery)\u{201D}.")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
+    // MARK: - Search results
+
+    private func row(for result: ProfileSearchResult) -> some View {
+        let snapshot = graph.snapshot(
+            for: result.id,
+            fallback: result.relationship,
+            fallbackFriendshipID: result.friendshipID
+        )
+
+        return HStack(alignment: .center, spacing: 12) {
+            FriendPersonRow(person: result.person)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            RelationshipButton(
+                person: result.person,
+                relationship: snapshot.state,
+                isBusy: busyPersonID == result.id
+            ) { action in
+                handle(action, person: result.person, friendshipID: snapshot.friendshipID)
             }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 24)
-            .listRowBackground(Color.clear)
         }
+    }
+
+    private var noResultsSection: some View {
+        VStack(spacing: 6) {
+            Text(searchFailed ? "Couldn't search" : "No one found")
+                .font(.headline)
+            Text(searchFailed
+                 ? "Check your connection and try again."
+                 : "No usernames or names match \u{201C}\(trimmedQuery)\u{201D}.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 24)
+        .listRowBackground(Color.clear)
+        .listRowSeparator(.hidden)
     }
 
     // MARK: - Search

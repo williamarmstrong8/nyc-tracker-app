@@ -1,29 +1,27 @@
 import SwiftUI
+import Charts
 
-/// Someone else's profile: who they are, what they've logged, and one control to
-/// change the relationship.
+/// Someone else's profile, laid out like the signed-in Profile page: centered
+/// identity, glanceable counts, then a photo grid of where they've been.
 ///
-/// Straightforward reads, because everything is public. No permission branching,
-/// no redaction, no "friends only" section — `isFriend` exists to decide which
-/// button to draw and nothing else.
-///
-/// Takes a `PersonSummary` rather than a user ID so the header can render
-/// immediately from what the caller already knew, and fill in stats when they
-/// arrive. Pushing to a spinner when the name is already on screen is a
-/// self-inflicted wait.
+/// Header counts are display-only — there is no list of their friends or visits
+/// to open from here. Activity photos still open the visit.
 struct FriendProfileView: View {
     let person: PersonSummary
 
     @Environment(SocialGraph.self) private var graph
     @Environment(MapAudienceStore.self) private var audience
     @Environment(AppRouter.self) private var router
-    @Environment(SocialStatsCache.self) private var stats
 
     @State private var summary: FriendProfileSummary?
-    @State private var overlap: FriendOverlap?
+    @State private var friendCount = 0
     @State private var visits: [FriendVisit] = []
     @State private var loadState: LoadState = .loading
     @State private var isMutating = false
+    @State private var openedVisit: FriendVisit?
+    @State private var confirmingUnfriend = false
+
+    private static let contentMargin: CGFloat = 20
 
     private enum LoadState: Equatable {
         case loading
@@ -37,10 +35,36 @@ struct FriendProfileView: View {
         graph.snapshot(for: person.id)
     }
 
+    private var displayPerson: PersonSummary {
+        summary?.person ?? person
+    }
+
+    private var visitedVisits: [FriendVisit] {
+        visits.filter { $0.visitKind == .visited }
+    }
+
+    private var wantToTryVisits: [FriendVisit] {
+        visits.filter { $0.visitKind == .wantToTry }
+    }
+
+    private var beenCount: Int {
+        summary?.visitCount ?? visitedVisits.count
+    }
+
+    private var wantToTryCount: Int {
+        summary?.wantToTryCount ?? wantToTryVisits.count
+    }
+
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                header
+            LazyVStack(alignment: .leading, spacing: 28) {
+                identitySection
+                    .padding(.horizontal, Self.contentMargin)
+
+                if loadState != .missing {
+                    actionRow
+                        .padding(.horizontal, Self.contentMargin)
+                }
 
                 switch loadState {
                 case .loading:
@@ -50,180 +74,266 @@ struct FriendProfileView: View {
 
                 case .missing:
                     missingAccountState
+                        .padding(.horizontal, Self.contentMargin)
 
                 case .failed(let message):
                     failureState(message)
+                        .padding(.horizontal, Self.contentMargin)
 
                 case .loaded:
-                    if let overlap, overlap.placesInCommon > 0 {
-                        overlapSection(overlap)
-                    }
-                    if visits.isEmpty {
-                        noVisitsState
-                    } else {
-                        visitsSection
-                    }
+                    categorySection
+                        .padding(.horizontal, Self.contentMargin)
+                    activitySection
                 }
-
-                // Clear the floating bottom nav.
-                Color.clear.frame(height: 90)
             }
-            .padding(.horizontal, 20)
             .padding(.vertical, 16)
         }
         .background(Color(uiColor: .systemGroupedBackground))
-        .navigationTitle(person.bestName)
+        .navigationTitle(displayPerson.bestName)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            if snapshot.state == .friends {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Menu {
+                        Button(role: .destructive) {
+                            Haptics.tap()
+                            confirmingUnfriend = true
+                        } label: {
+                            Label("Remove friend", systemImage: "person.badge.minus")
+                        }
+                        .disabled(isMutating)
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                    }
+                    .accessibilityLabel("More")
+                }
+            }
+        }
+        .confirmationDialog(
+            "Remove \(displayPerson.bestName) from your friends?",
+            isPresented: $confirmingUnfriend,
+            titleVisibility: .visible
+        ) {
+            Button("Remove friend", role: .destructive) {
+                handle(.unfriend)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Their places disappear from your map. They aren't notified.")
+        }
         .task(id: person.id) { await load() }
         .refreshable { await load() }
+        .sheet(item: $openedVisit) { visit in
+            FriendVisitDetailSheet(visit: visit)
+        }
     }
 
-    // MARK: - Header
+    // MARK: - Identity
 
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(alignment: .top, spacing: 14) {
-                PersonAvatar(person: person, size: 72, showsPaletteRing: true)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(person.bestName)
-                        .font(.title3.weight(.semibold))
-                    if let handle = person.handle {
-                        Text(handle)
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                    }
-                    if let bio = summary?.bio, !bio.isEmpty {
-                        Text(bio)
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                            .padding(.top, 2)
-                    }
+    private var identitySection: some View {
+        VStack(spacing: 10) {
+            PersonAvatar(person: displayPerson, size: 108, showsPaletteRing: true)
+                .overlay(Circle().stroke(Color(uiColor: .systemBackground), lineWidth: 3))
+                .shadow(color: .black.opacity(0.12), radius: 8, x: 0, y: 4)
+
+            VStack(spacing: 3) {
+                Text(displayPerson.bestName)
+                    .font(.title3.weight(.semibold))
+                if let handle = displayPerson.handle {
+                    Text(handle)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
                 }
-                Spacer(minLength: 0)
+                if let bio = summary?.bio, !bio.isEmpty {
+                    Text(bio)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.top, 2)
+                }
             }
 
-            if let summary, loadState == .loaded {
-                statsRow(summary)
-            }
-
-            if loadState != .missing {
-                actionRow
-            }
+            ProfileHeaderStats(
+                friendCount: friendCount,
+                beenCount: beenCount,
+                wantToTryCount: wantToTryCount
+            )
         }
-    }
-
-    private func statsRow(_ summary: FriendProfileSummary) -> some View {
-        HStack(spacing: 8) {
-            statPill(summary.visitCount, "visits", "checkmark.seal.fill")
-            statPill(summary.placeCount, "places", "mappin.and.ellipse")
-            statPill(summary.wantToTryCount, "want to try", "bookmark.fill")
-            Spacer(minLength: 0)
-        }
-    }
-
-    private func statPill(_ value: Int, _ label: String, _ symbol: String) -> some View {
-        HStack(spacing: 5) {
-            Image(systemName: symbol)
-            Text("\(value)").fontWeight(.semibold)
-            Text(label).foregroundStyle(.secondary)
-        }
-        .font(.caption)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(Capsule().fill(Color(uiColor: .secondarySystemGroupedBackground)))
+        .frame(maxWidth: .infinity)
+        .padding(.top, 8)
     }
 
     @ViewBuilder
     private var actionRow: some View {
-        // `isSelf` renders no relationship control at all, which would leave an
-        // empty row — so the whole thing is skipped rather than laid out empty.
-        if snapshot.state != .isSelf {
-            VStack(spacing: 10) {
-                RelationshipButton(
-                    person: person,
-                    relationship: snapshot.state,
-                    isBusy: isMutating,
-                    isCompact: false
-                ) { action in
-                    handle(action)
-                }
+        switch snapshot.state {
+        case .isSelf:
+            EmptyView()
 
-                // Only offered for actual friends: the map filter's modes are
-                // "mine" and "friends", and pointing it at a non-friend would ask
-                // for a mode that does not exist.
-                if snapshot.state == .friends {
-                    Button {
-                        Haptics.tap()
-                        audience.select(.friend(person.id))
-                        router.showMap()
-                    } label: {
-                        Label("View on map", systemImage: "map")
-                            .frame(maxWidth: .infinity, minHeight: 44)
-                    }
-                    .buttonStyle(.glass)
-                }
+        case .friends:
+            Button {
+                Haptics.tap()
+                audience.select(.friend(person.id))
+                router.showMap()
+            } label: {
+                Label("View on map", systemImage: "map")
+                    .frame(maxWidth: .infinity, minHeight: 44)
+            }
+            .buttonStyle(.glass)
+
+        default:
+            RelationshipButton(
+                person: displayPerson,
+                relationship: snapshot.state,
+                isBusy: isMutating,
+                isCompact: false
+            ) { action in
+                handle(action)
             }
         }
     }
 
-    // MARK: - Sections
+    // MARK: - Category donut
 
-    /// Places you have both been. Computed server-side because the local mirror
-    /// holds only the user's own visits and knows nothing about theirs.
-    private func overlapSection(_ overlap: FriendOverlap) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 6) {
-                Image(systemName: "person.2.wave.2.fill")
-                    .font(.footnote.weight(.semibold))
-                    .foregroundStyle(Color.accentColor)
-                Text("\(pluralized(overlap.placesInCommon, "place")) in common")
+    @ViewBuilder
+    private var categorySection: some View {
+        if !categoryBreakdown.isEmpty {
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Where they've been")
                     .font(.subheadline.weight(.semibold))
-                Spacer(minLength: 0)
-            }
+                    .foregroundStyle(.secondary)
 
-            FlowLayout(spacing: 6) {
-                ForEach(overlap.commonPlaces.prefix(12)) { place in
-                    Text(place.name)
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(.primary)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 5)
-                        .background(Capsule().fill(Color(uiColor: .tertiarySystemFill)))
+                HStack(spacing: 28) {
+                    Chart(categoryBreakdown, id: \.category) { item in
+                        SectorMark(
+                            angle: .value("Count", item.count),
+                            innerRadius: .ratio(0.68),
+                            angularInset: 2
+                        )
+                        .cornerRadius(4)
+                        .foregroundStyle(categoryTint(for: item.category))
+                    }
+                    .frame(width: 132, height: 132)
+                    .chartBackground { _ in
+                        VStack(spacing: 1) {
+                            Text("\(visitedVisits.count)")
+                                .font(.title2.weight(.bold))
+                            Text(visitedVisits.count == 1 ? "place" : "places")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .accessibilityLabel("\(visitedVisits.count) places visited")
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        ForEach(categoryBreakdown, id: \.category) { item in
+                            HStack(spacing: 8) {
+                                Image(systemName: categorySymbol(for: item.category))
+                                    .font(.caption2)
+                                    .foregroundStyle(.white)
+                                    .frame(width: 20, height: 20)
+                                    .background(Circle().fill(categoryTint(for: item.category)))
+                                Text(categoryLabel(for: item.category))
+                                    .font(.subheadline)
+                                    .lineLimit(1)
+                                Spacer(minLength: 8)
+                                Text("\(item.count)")
+                                    .font(.subheadline.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    Spacer(minLength: 0)
                 }
             }
+        }
+    }
 
-            if overlap.commonPlaces.count > 12 {
-                Text("+ \(overlap.commonPlaces.count - 12) more")
-                    .font(.caption)
+    private var categoryBreakdown: [(category: PlaceCategory, count: Int)] {
+        let grouped = Dictionary(grouping: visitedVisits) { $0.category }
+        return PlaceCategory.allCases
+            .compactMap { category -> (category: PlaceCategory, count: Int)? in
+                let count = grouped[category]?.count ?? 0
+                return count > 0 ? (category, count) : nil
+            }
+            .sorted { $0.count > $1.count }
+    }
+
+    // MARK: - Activity
+
+    @ViewBuilder
+    private var activitySection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Activity")
+                    .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.secondary)
+                Spacer()
+                if !visitedVisits.isEmpty {
+                    Text(pluralized(visitedVisits.count, "place"))
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .padding(.horizontal, Self.contentMargin)
+
+            if visitedVisits.isEmpty {
+                activityEmptyState
+                    .padding(.horizontal, Self.contentMargin)
+            } else {
+                LazyVGrid(
+                    columns: [
+                        GridItem(.flexible(), spacing: 3),
+                        GridItem(.flexible(), spacing: 3),
+                        GridItem(.flexible(), spacing: 3)
+                    ],
+                    spacing: 3
+                ) {
+                    ForEach(visitedVisits) { visit in
+                        Button {
+                            Haptics.tap()
+                            openedVisit = visit
+                        } label: {
+                            activityCell(for: visit)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 1)
             }
         }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(Color(uiColor: .secondarySystemGroupedBackground))
-        )
     }
 
-    private var visitsSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Places they've been")
-                .font(.subheadline.weight(.semibold))
+    private func activityCell(for visit: FriendVisit) -> some View {
+        let photo = visit.photos.sorted(by: { $0.sortOrder < $1.sortOrder }).first
+        return Group {
+            if let photo {
+                PhotoView(source: .friendPhoto(path: photo.smallestPath), contentMode: .fill)
+            } else {
+                ZStack {
+                    Color(uiColor: .secondarySystemBackground)
+                    Image(systemName: "photo")
+                        .font(.title3)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+        }
+        .aspectRatio(1, contentMode: .fit)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .clipped()
+    }
+
+    private var activityEmptyState: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "photo.on.rectangle.angled")
+                .font(.system(size: 36, weight: .light))
                 .foregroundStyle(.secondary)
-
-            ForEach(visits) { visit in
-                FriendVisitCard(visit: visit, showsAuthor: false)
-            }
+            Text("\(displayPerson.shortName) hasn't logged any visits yet")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
         }
-    }
-
-    private var noVisitsState: some View {
-        emptyBlock(
-            symbol: "map",
-            title: "Nothing logged yet",
-            message: "\(person.shortName) hasn't added any places."
-        )
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 28)
     }
 
     private var missingAccountState: some View {
@@ -273,25 +383,24 @@ struct FriendProfileView: View {
     // MARK: - Loading
 
     private func load() async {
-        loadState = .loading
+        let showSpinner = summary == nil && visits.isEmpty
+        if showSpinner { loadState = .loading }
+
         do {
-            // Sequential rather than concurrent on purpose: if the profile is
-            // gone there is nothing to list, and firing both would spend a
-            // request to find that out.
             guard let profile = try await FriendshipService.profile(of: person.id) else {
                 summary = nil
                 visits = []
+                friendCount = 0
                 loadState = .missing
                 return
             }
             summary = profile
-            visits = try await FriendshipService.visits(of: person.id)
-            loadState = .loaded
 
-            // After the content, not alongside it: the overlap is a nice-to-have
-            // strip and shouldn't hold up the profile. Cached with a short TTL,
-            // so revisiting a friend is usually free.
-            overlap = await stats.overlap(with: person.id)
+            async let loadedVisits = FriendshipService.visits(of: person.id)
+            async let loadedFriendCount = FriendshipService.acceptedFriendCount(of: person.id)
+            visits = try await loadedVisits
+            friendCount = (try? await loadedFriendCount) ?? friendCount
+            loadState = .loaded
         } catch {
             loadState = .failed(
                 SupabaseErrorPresenter.presentable(error, context: .general).message
@@ -318,6 +427,38 @@ struct FriendProfileView: View {
                 guard let id = snapshot.friendshipID else { return }
                 await graph.remove(id)
             }
+        }
+    }
+
+    // MARK: - Style helpers
+
+    private func categoryTint(for category: PlaceCategory) -> Color {
+        switch category {
+        case .restaurant: .orange
+        case .bar:        .purple
+        case .cafe:       .brown
+        case .bakery:     .pink
+        case .other:      .gray
+        }
+    }
+
+    private func categorySymbol(for category: PlaceCategory) -> String {
+        switch category {
+        case .restaurant: "fork.knife"
+        case .bar:        "wineglass.fill"
+        case .cafe:       "cup.and.saucer.fill"
+        case .bakery:     "birthday.cake.fill"
+        case .other:      "mappin"
+        }
+    }
+
+    private func categoryLabel(for category: PlaceCategory) -> String {
+        switch category {
+        case .restaurant: "Restaurants"
+        case .bar:        "Bars"
+        case .cafe:       "Cafes"
+        case .bakery:     "Bakeries"
+        case .other:      "Other"
         }
     }
 }

@@ -1,4 +1,11 @@
 import SwiftUI
+import CoreLocation
+
+/// A friend's note on a sent place, shown at the top of the place sheet.
+struct PlaceRecommendationNote: Equatable, Hashable, Sendable {
+    var senderName: String
+    var message: String
+}
 
 /// Everything logged at one place, by everyone in the current filter set.
 ///
@@ -16,25 +23,38 @@ struct PlaceDetailSheet: View {
     let group: MapPlaceGroup
     /// Opens the full write-up for one of the user's own visits.
     var onOpenOwnVisit: (Visit) -> Void
+    /// A note a friend attached when they sent this place. Shown up top so it
+    /// isn't buried under visit cards.
+    var recommendationNote: PlaceRecommendationNote? = nil
 
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
+                VStack(alignment: .leading, spacing: 28) {
+                    heroPhoto
                     header
+                        .padding(.horizontal, 10)
+
+                    if let recommendationNote, !recommendationNote.message.isEmpty {
+                        recommendationBanner(recommendationNote)
+                            .padding(.horizontal, 10)
+                    }
 
                     // Save / send, then who else knows the place. Both need the
                     // shared `places.id`, so they are only offered once the local
                     // place has been resolved upstream — see `placeSummary`.
                     if let summary = placeSummary {
-                        PlaceActionsRow(place: summary)
+                        PlaceActionsRow(place: summary, photo: heroPhotoSources.first)
+                            .padding(.horizontal, 10)
                         PlaceSocialSection(placeID: summary.id)
+                            .padding(.horizontal, 10)
                     }
 
                     if !group.ownVisits.isEmpty {
                         ownSection
+                            .padding(.horizontal, 10)
                     }
 
                     if !group.friendVisits.isEmpty {
@@ -47,12 +67,13 @@ struct PlaceDetailSheet: View {
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 40)
+                            .padding(.horizontal, 10)
                     }
                 }
-                .padding(.horizontal, 20)
+                .padding(.horizontal, 1)
                 .padding(.vertical, 16)
             }
-            .background(Color(uiColor: .systemGroupedBackground))
+            .background(Color(uiColor: .systemBackground))
             .navigationTitle(group.name)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -61,9 +82,52 @@ struct PlaceDetailSheet: View {
                 }
             }
         }
+        .presentationDragIndicator(.visible)
     }
 
     // MARK: - Header
+
+    @ViewBuilder
+    private var heroPhoto: some View {
+        if !heroPhotoSources.isEmpty {
+            Color.clear
+                .aspectRatio(3 / 4, contentMode: .fit)
+                .overlay {
+                    PhotoCarousel(sources: heroPhotoSources)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        }
+    }
+
+    private var heroPhotoSources: [PhotoView.Source] {
+        let own = group.ownVisits.flatMap { visit in
+            visit.photos.sorted(by: { $0.order < $1.order }).map { PhotoView.Source(photo: $0) }
+        }
+        if !own.isEmpty { return own }
+        return group.friendVisits.flatMap { visit in
+            visit.photos.map { PhotoView.Source.friendPhoto(path: $0.storagePath) }
+        }
+    }
+
+    private func recommendationBanner(_ note: PlaceRecommendationNote) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("From \(note.senderName)")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            HStack(alignment: .top, spacing: 8) {
+                Rectangle()
+                    .fill(Color.accentColor.opacity(0.5))
+                    .frame(width: 3)
+                    .clipShape(Capsule())
+                Text("\u{201C}\(note.message)\u{201D}")
+                    .font(.title3)
+                    .foregroundStyle(.primary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
 
     private var header: some View {
         HStack(spacing: 12) {
@@ -92,7 +156,7 @@ struct PlaceDetailSheet: View {
                         PersonAvatar(person: person, size: 28)
                             .overlay(
                                 Circle().stroke(
-                                    Color(uiColor: .systemGroupedBackground),
+                                    Color(uiColor: .systemBackground),
                                     lineWidth: 2
                                 )
                             )
@@ -137,12 +201,13 @@ struct PlaceDetailSheet: View {
     // MARK: - Sections
 
     /// Pinned to the top, per the brief: on a place you've been, your own entry
-    /// is the one you came to find.
+    /// is the one you came to find. Floating rows — thumbnail and type, no fill.
     private var ownSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 0) {
             sectionTitle("\(pluralized(group.ownVisits.count, "visit")) by you")
+                .padding(.bottom, 4)
 
-            ForEach(group.ownVisits) { visit in
+            ForEach(Array(group.ownVisits.enumerated()), id: \.element.id) { index, visit in
                 Button {
                     Haptics.tap()
                     onOpenOwnVisit(visit)
@@ -150,46 +215,48 @@ struct PlaceDetailSheet: View {
                     ownVisitRow(visit)
                 }
                 .buttonStyle(.plain)
+
+                if index < group.ownVisits.count - 1 {
+                    Divider().padding(.leading, 78)
+                }
             }
         }
     }
 
     private func ownVisitRow(_ visit: Visit) -> some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 14) {
             thumbnail(for: visit)
-                .frame(width: 52, height: 52)
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .frame(width: 64, height: 64)
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .overlay {
+                    if visit.kind == .wantToTry {
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .strokeBorder(Color.blue, lineWidth: 2.5)
+                    }
+                }
 
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 4) {
                 Text(visit.title.isEmpty ? group.name : visit.title)
-                    .font(.subheadline.weight(.semibold))
+                    .font(.body.weight(.semibold))
                     .foregroundStyle(.primary)
                     .lineLimit(1)
                 Text(visit.visitedOn.formatted(date: .abbreviated, time: .omitted))
-                    .font(.caption)
+                    .font(.subheadline)
                     .foregroundStyle(.secondary)
                 if !visit.enrichedDescription.isEmpty {
                     Text(visit.enrichedDescription)
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.tertiary)
                         .lineLimit(2)
                 }
             }
             Spacer(minLength: 4)
             Image(systemName: "chevron.right")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(.tertiary)
         }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(Color(uiColor: .secondarySystemGroupedBackground))
-        )
-        .overlay {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .strokeBorder(Color.accentColor.opacity(0.55), lineWidth: 1.5)
-        }
+        .padding(.vertical, 12)
+        .contentShape(Rectangle())
     }
 
     @ViewBuilder
@@ -210,8 +277,9 @@ struct PlaceDetailSheet: View {
     }
 
     private var friendsSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 28) {
             sectionTitle(friendsSectionTitle)
+                .padding(.horizontal, 10)
 
             ForEach(group.friendVisits) { visit in
                 FriendVisitCard(visit: visit, showsAuthor: true)
