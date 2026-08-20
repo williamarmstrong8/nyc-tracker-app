@@ -24,6 +24,15 @@ struct ProfileView: View {
     @State private var showAddFriends = false
     @State private var social: OwnSocialStats?
 
+    @State private var tab: ProfileTab = .activity
+    /// Entries friends tagged the user in. Server-backed rather than mirrored,
+    /// for the same reason the wishlist is: these rows are authored by other
+    /// people while this app is closed, so there is nothing local to sync.
+    @State private var taggedVisits: [FriendVisit] = []
+    @State private var isLoadingTagged = false
+    @State private var hasLoadedTagged = false
+    @State private var openedTaggedVisit: FriendVisit?
+
     /// Scoped to the signed-in user, same predicate every other own-visit query uses.
     @Query private var visits: [Visit]
 
@@ -38,7 +47,13 @@ struct ProfileView: View {
         self.filter = filter
         _visits = Query(
             filter: LocalStore.visitsPredicate(for: userID),
-            sort: [SortDescriptor(\Visit.visitedOn, order: .reverse)]
+            sort: [
+                SortDescriptor(\Visit.visitedOn, order: .reverse),
+                // Upload order breaks a tie. A user backfilling several
+                // places to the same day would otherwise get an order
+                // SwiftData is free to change between launches.
+                SortDescriptor(\Visit.createdAt, order: .reverse)
+            ]
         )
     }
 
@@ -90,12 +105,25 @@ struct ProfileView: View {
             .sheet(isPresented: $showAddFriends) {
                 AddFriendsView()
             }
+            .sheet(item: $openedTaggedVisit) { visit in
+                FriendVisitDetailSheet(visit: visit)
+            }
             .task {
                 social = socialStats.cachedOwnStats()
                 social = await socialStats.ownStats()
             }
+            .task(id: userID) {
+                await loadTaggedVisits()
+            }
             .onChange(of: demo.epoch) { _, _ in
                 Task { await refreshSocialStats() }
+                Task { await loadTaggedVisits() }
+            }
+            // A friend can tag the user at any time, and a friendship ending
+            // takes tags with it. Both land here on the next sync tick rather
+            // than only on a cold launch.
+            .onChange(of: sync.lastSyncedAt) { _, _ in
+                Task { await loadTaggedVisits() }
             }
         }
     }
@@ -107,7 +135,6 @@ struct ProfileView: View {
             avatar
                 .frame(width: 108, height: 108)
                 .clipShape(Circle())
-                .overlay(Circle().stroke(Color(uiColor: .systemBackground), lineWidth: 3))
                 .shadow(color: .black.opacity(0.12), radius: 8, x: 0, y: 4)
                 .accessibilityHidden(true)
 
@@ -161,44 +188,126 @@ struct ProfileView: View {
     @ViewBuilder
     private var activitySection: some View {
         VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .firstTextBaseline) {
-                Text("Activity")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                Spacer()
-                if !visitedVisits.isEmpty {
-                    Text(pluralized(visitedVisits.count, "place"))
-                        .font(.caption)
+            ProfileTabPicker(selection: $tab)
+                .padding(.horizontal, Self.contentMargin)
+
+            switch tab {
+            case .activity: ownGrid
+            case .tagged:   taggedGrid
+            }
+        }
+    }
+
+    private static let gridColumns = [
+        GridItem(.flexible(), spacing: 3),
+        GridItem(.flexible(), spacing: 3),
+        GridItem(.flexible(), spacing: 3)
+    ]
+
+    @ViewBuilder
+    private var ownGrid: some View {
+        if visitedVisits.isEmpty {
+            activityEmptyState
+                .padding(.horizontal, Self.contentMargin)
+        } else {
+            LazyVGrid(columns: Self.gridColumns, spacing: 3) {
+                ForEach(visitedVisits) { visit in
+                    Button {
+                        Haptics.tap()
+                        openedVisit = visit
+                    } label: {
+                        activityCell(for: visit)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 1)
+        }
+    }
+
+    /// Entries friends tagged the user in. Opens the friend write-up sheet, not
+    /// the owned one — these are somebody else's entries, with no edit or delete
+    /// path from here.
+    @ViewBuilder
+    private var taggedGrid: some View {
+        if isLoadingTagged && taggedVisits.isEmpty {
+            ProgressView()
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 40)
+        } else if taggedVisits.isEmpty {
+            taggedEmptyState
+                .padding(.horizontal, Self.contentMargin)
+        } else {
+            LazyVGrid(columns: Self.gridColumns, spacing: 3) {
+                ForEach(taggedVisits) { visit in
+                    Button {
+                        Haptics.tap()
+                        openedTaggedVisit = visit
+                    } label: {
+                        taggedCell(for: visit)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 1)
+        }
+    }
+
+    private func taggedCell(for visit: FriendVisit) -> some View {
+        let photo = visit.photos.sorted(by: { $0.sortOrder < $1.sortOrder }).first
+        return Group {
+            if let photo {
+                PhotoView(source: .friendPhoto(path: photo.smallestPath), contentMode: .fill)
+            } else {
+                ZStack {
+                    Color(uiColor: .secondarySystemBackground)
+                    Image(systemName: "photo")
+                        .font(.title3)
                         .foregroundStyle(.tertiary)
                 }
             }
-            .padding(.horizontal, Self.contentMargin)
-
-            if visitedVisits.isEmpty {
-                activityEmptyState
-                    .padding(.horizontal, Self.contentMargin)
-            } else {
-                LazyVGrid(
-                    columns: [
-                        GridItem(.flexible(), spacing: 3),
-                        GridItem(.flexible(), spacing: 3),
-                        GridItem(.flexible(), spacing: 3)
-                    ],
-                    spacing: 3
-                ) {
-                    ForEach(visitedVisits) { visit in
-                        Button {
-                            Haptics.tap()
-                            openedVisit = visit
-                        } label: {
-                            activityCell(for: visit)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .padding(.horizontal, 1)
-            }
         }
+        .aspectRatio(1, contentMode: .fit)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .clipped()
+        // Whose entry this is matters more here than on the user's own grid,
+        // where the answer is always "yours".
+        .overlay(alignment: .bottomLeading) {
+            PersonAvatar(person: visit.person, size: 20)
+                .overlay { Circle().strokeBorder(.white.opacity(0.9), lineWidth: 1) }
+                .padding(5)
+        }
+    }
+
+    private var taggedEmptyState: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "person.2")
+                .font(.system(size: 36, weight: .light))
+                .foregroundStyle(.secondary)
+            Text("Nothing yet")
+                .font(.headline)
+            Text("When a friend tags you in a place they logged, it shows up here.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 28)
+    }
+
+    private func loadTaggedVisits() async {
+        // Only the first load shows a spinner. A refresh triggered by a sync
+        // tick should not blank a grid the user is looking at.
+        isLoadingTagged = !hasLoadedTagged
+        defer {
+            isLoadingTagged = false
+            hasLoadedTagged = true
+        }
+
+        // A failure leaves whatever was already loaded on screen. This tab is
+        // not the reason the user opened their profile, and an error banner over
+        // a photo grid is worse than a slightly stale one.
+        taggedVisits = (try? await VisitTagService.taggedVisits(of: userID)) ?? taggedVisits
     }
 
     private func activityCell(for visit: Visit) -> some View {

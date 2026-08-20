@@ -166,11 +166,10 @@ struct ChatView: View {
                         router.showMap()
                     }
                 )
-                .toolbarBackground(.black, for: .navigationBar)
+                .toolbarBackground(Color(uiColor: .systemBackground), for: .navigationBar)
                 .toolbarBackgroundVisibility(.visible, for: .navigationBar)
             }
-            .preferredColorScheme(.dark)
-            .presentationBackground(.black)
+            .presentationBackground(Color(uiColor: .systemBackground))
 
         case .friendVisit(let visit):
             NavigationStack {
@@ -182,11 +181,10 @@ struct ChatView: View {
                         router.showMap()
                     }
                 )
-                .toolbarBackground(.black, for: .navigationBar)
+                .toolbarBackground(Color(uiColor: .systemBackground), for: .navigationBar)
                 .toolbarBackgroundVisibility(.visible, for: .navigationBar)
             }
-            .preferredColorScheme(.dark)
-            .presentationBackground(.black)
+            .presentationBackground(Color(uiColor: .systemBackground))
         }
     }
 
@@ -669,7 +667,10 @@ private struct ChatMessageRow: View {
     /// phone, which keeps the photo big enough to recognise a room by while
     /// still reading as "attached to a message" rather than as a feed post.
     private static let previewWidth: CGFloat = 240
-    private static let bubbleTextColor = Color.black.opacity(0.88)
+    /// Their bubble sits on `systemGroupedBackground`, so it needs to be the
+    /// raised colour of that pair — white in light mode, near-black in dark —
+    /// rather than a literal white that vanishes into a light page.
+    private static let theirBubbleFill = Color(uiColor: .secondarySystemGroupedBackground)
     private static let mineBubbleFill = Color.blue
     /// The gap a bubble always leaves on the opposite side of the thread.
     /// This — not a `maxWidth` on the bubble itself — is what caps its
@@ -707,14 +708,14 @@ private struct ChatMessageRow: View {
             if isMine { Spacer(minLength: Self.bubbleMargin) }
             Text(message.body)
                 .font(.subheadline)
-                .foregroundStyle(isMine ? Color.white : Self.bubbleTextColor)
+                .foregroundStyle(isMine ? Color.white : Color.primary)
                 .multilineTextAlignment(isMine ? .trailing : .leading)
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
                 .background(
                     RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .fill(isMine ? Self.mineBubbleFill : Color.white)
+                        .fill(isMine ? Self.mineBubbleFill : Self.theirBubbleFill)
                 )
             if !isMine { Spacer(minLength: Self.bubbleMargin) }
         }
@@ -726,7 +727,7 @@ private struct ChatMessageRow: View {
         } label: {
             VStack(alignment: .leading, spacing: 8) {
                 Color.clear
-                    .aspectRatio(4 / 3, contentMode: .fit)
+                    .aspectRatio(3 / 4, contentMode: .fit)
                     .overlay {
                         if let photoSource {
                             PhotoView(source: photoSource, contentMode: .fill)

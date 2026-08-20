@@ -50,7 +50,7 @@ struct FriendsView: View {
                     friendsList
                 }
             }
-            .background(Color.black)
+            .background(Color(uiColor: .systemBackground))
             .navigationTitle("Friends")
             .navigationBarTitleDisplayMode(.inline)
             .appSearchable(text: $query, prompt: "Search friends")
@@ -137,8 +137,7 @@ struct FriendsView: View {
 
         return FriendPersonRow(
             person: edge.person,
-            subtitle: thread?.preview,
-            showsPaletteRing: true
+            subtitle: thread?.preview
         ) {
             if let thread, let sentAt = thread.lastMessageAt {
                 VStack(alignment: .trailing, spacing: 6) {

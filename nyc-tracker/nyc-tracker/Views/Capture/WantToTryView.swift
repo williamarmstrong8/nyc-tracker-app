@@ -102,7 +102,8 @@ struct WantToTryView: View {
                 NavigationStack {
                     VenuePickerView(
                         candidates: candidates,
-                        biasCoordinate: pendingResolution?.coordinate
+                        biasCoordinate: pendingResolution?.coordinate,
+                        typedName: name.trimmingCharacters(in: .whitespaces).isEmpty ? nil : name
                     ) { picked in
                         showPicker = false
                         persist(candidate: picked)
@@ -139,7 +140,7 @@ struct WantToTryView: View {
             HStack(spacing: 10) {
                 ForEach(photoItems, id: \.itemIdentifier) { item in
                     PhotoView(source: .pickerItem(item), contentMode: .fill)
-                        .frame(width: 120, height: 150)
+                        .frame(width: 120, height: 160)
                         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 }
             }
@@ -297,14 +298,15 @@ struct WantToTryView: View {
             persist(candidate: confident)
             Haptics.success()
             dismiss()
-        } else if !candidates.isEmpty {
-            // Always confirm when we resolved to a location via photos alone (no typed name), so
-            // the user has a chance to correct.
-            showPicker = true
         } else {
-            persist(candidate: nil, coordinate: resolution.coordinate ?? deviceLocation?.coordinate)
-            Haptics.success()
-            dismiss()
+            // Always confirm when we resolved to a location via photos alone (no typed name), so
+            // the user has a chance to correct — and confirm with NO candidates
+            // too. That case used to save silently at the device's coordinate,
+            // which is the wrong answer for the exact places MapKit cannot find:
+            // a truck or a stall, pinned wherever the phone happened to be. The
+            // picker's own empty state offers manual search and drop-a-pin, and
+            // "keep my name" still lands on the old behaviour.
+            showPicker = true
         }
     }
 

@@ -54,10 +54,10 @@ struct SendPlaceSheet: View {
                     picker
                 }
             }
-            .background(Color.black)
+            .background(Color(uiColor: .systemBackground))
             .navigationTitle(results == nil ? "Send to friends" : "Sent")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(.black, for: .navigationBar)
+            .toolbarBackground(Color(uiColor: .systemBackground), for: .navigationBar)
             .toolbarBackgroundVisibility(.visible, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -80,8 +80,7 @@ struct SendPlaceSheet: View {
                 }
             }
         }
-        .preferredColorScheme(.dark)
-        .presentationBackground(.black)
+        .presentationBackground(Color(uiColor: .systemBackground))
     }
 
     // MARK: - Picker
@@ -148,7 +147,7 @@ struct SendPlaceSheet: View {
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
         .listSectionSpacing(20)
-        .background(Color.black)
+        .background(Color(uiColor: .systemBackground))
         .animation(.default, value: selected.isEmpty)
         .appSearchable(text: $query, prompt: "Search friends")
     }
@@ -157,7 +156,7 @@ struct SendPlaceSheet: View {
     private var placeHeader: some View {
         VStack(alignment: .leading, spacing: 12) {
             Color.clear
-                .aspectRatio(4 / 3, contentMode: .fit)
+                .aspectRatio(3 / 4, contentMode: .fit)
                 .overlay { placeThumbnail }
                 .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
 
@@ -314,7 +313,7 @@ private struct SendResultsList: View {
         }
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
-        .background(Color.black)
+        .background(Color(uiColor: .systemBackground))
     }
 
     private func caption(for outcome: RecommendationOutcome, name: String) -> String {

@@ -84,7 +84,7 @@ struct FriendVisitCard: View {
             HStack(spacing: 8) {
                 ForEach(visit.photos) { photo in
                     PhotoView(source: .friendPhoto(path: photo.smallestPath), contentMode: .fill)
-                        .frame(width: 168, height: 168)
+                        .frame(width: 168, height: 224)
                         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                 }
             }

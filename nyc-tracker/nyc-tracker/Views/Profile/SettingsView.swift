@@ -135,7 +135,6 @@ struct SettingsView: View {
                 avatarPicker
                     .frame(width: 108, height: 108)
                     .clipShape(Circle())
-                    .overlay(Circle().stroke(Color(uiColor: .systemBackground), lineWidth: 3))
                     .shadow(color: .black.opacity(0.12), radius: 8, x: 0, y: 4)
 
                 VStack(spacing: 3) {

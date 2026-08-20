@@ -21,6 +21,11 @@ struct FriendProfileView: View {
     @State private var openedVisit: FriendVisit?
     @State private var confirmingUnfriend = false
 
+    @State private var tab: ProfileTab = .activity
+    /// Entries other people tagged this person in. Loaded alongside their own,
+    /// so switching tabs never waits on a request.
+    @State private var taggedVisits: [FriendVisit] = []
+
     private static let contentMargin: CGFloat = 20
 
     private enum LoadState: Equatable {
@@ -132,8 +137,7 @@ struct FriendProfileView: View {
 
     private var identitySection: some View {
         VStack(spacing: 10) {
-            PersonAvatar(person: displayPerson, size: 108, showsPaletteRing: true)
-                .overlay(Circle().stroke(Color(uiColor: .systemBackground), lineWidth: 3))
+            PersonAvatar(person: displayPerson, size: 108)
                 .shadow(color: .black.opacity(0.12), radius: 8, x: 0, y: 4)
 
             VStack(spacing: 3) {
@@ -263,43 +267,70 @@ struct FriendProfileView: View {
     @ViewBuilder
     private var activitySection: some View {
         VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .firstTextBaseline) {
-                Text("Activity")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                Spacer()
-                if !visitedVisits.isEmpty {
-                    Text(pluralized(visitedVisits.count, "place"))
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                }
-            }
-            .padding(.horizontal, Self.contentMargin)
+            ProfileTabPicker(selection: $tab)
+                .padding(.horizontal, Self.contentMargin)
 
-            if visitedVisits.isEmpty {
-                activityEmptyState
-                    .padding(.horizontal, Self.contentMargin)
-            } else {
-                LazyVGrid(
-                    columns: [
-                        GridItem(.flexible(), spacing: 3),
-                        GridItem(.flexible(), spacing: 3),
-                        GridItem(.flexible(), spacing: 3)
-                    ],
-                    spacing: 3
-                ) {
-                    ForEach(visitedVisits) { visit in
-                        Button {
-                            Haptics.tap()
-                            openedVisit = visit
-                        } label: {
-                            activityCell(for: visit)
-                        }
-                        .buttonStyle(.plain)
+            grid(for: tab == .activity ? visitedVisits : taggedVisits,
+                 showsAuthor: tab == .tagged)
+        }
+    }
+
+    private static let gridColumns = [
+        GridItem(.flexible(), spacing: 3),
+        GridItem(.flexible(), spacing: 3),
+        GridItem(.flexible(), spacing: 3)
+    ]
+
+    /// One grid for both tabs. `showsAuthor` is the only difference: on the
+    /// Tagged tab the entries belong to other people, and whose they are is
+    /// the first thing worth knowing about them.
+    @ViewBuilder
+    private func grid(for rows: [FriendVisit], showsAuthor: Bool) -> some View {
+        if rows.isEmpty {
+            emptyState(for: tab)
+                .padding(.horizontal, Self.contentMargin)
+        } else {
+            LazyVGrid(columns: Self.gridColumns, spacing: 3) {
+                ForEach(rows) { visit in
+                    Button {
+                        Haptics.tap()
+                        openedVisit = visit
+                    } label: {
+                        activityCell(for: visit)
+                            .overlay(alignment: .bottomLeading) {
+                                if showsAuthor {
+                                    PersonAvatar(person: visit.person, size: 20)
+                                        .overlay {
+                                            Circle().strokeBorder(.white.opacity(0.9), lineWidth: 1)
+                                        }
+                                        .padding(5)
+                                }
+                            }
                     }
+                    .buttonStyle(.plain)
                 }
-                .padding(.horizontal, 1)
             }
+            .padding(.horizontal, 1)
+        }
+    }
+
+    @ViewBuilder
+    private func emptyState(for tab: ProfileTab) -> some View {
+        switch tab {
+        case .activity:
+            activityEmptyState
+        case .tagged:
+            VStack(spacing: 8) {
+                Image(systemName: "person.2")
+                    .font(.system(size: 36, weight: .light))
+                    .foregroundStyle(.secondary)
+                Text("\(displayPerson.shortName) hasn't been tagged in anything yet")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 28)
         }
     }
 
@@ -398,8 +429,12 @@ struct FriendProfileView: View {
 
             async let loadedVisits = FriendshipService.visits(of: person.id)
             async let loadedFriendCount = FriendshipService.acceptedFriendCount(of: person.id)
+            async let loadedTagged = VisitTagService.taggedVisits(of: person.id)
             visits = try await loadedVisits
             friendCount = (try? await loadedFriendCount) ?? friendCount
+            // Not `try`: an empty Tagged tab is a fine outcome, and it should
+            // not be able to fail the profile the user actually asked for.
+            taggedVisits = (try? await loadedTagged) ?? []
             loadState = .loaded
         } catch {
             loadState = .failed(

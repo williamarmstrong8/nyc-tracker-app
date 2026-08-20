@@ -198,6 +198,30 @@ enum LocationResolver {
         )
     }
 
+    /// A typed address → a coordinate.
+    ///
+    /// The counterpart to `describe`: used when the user is placing a venue by
+    /// hand and types a street address instead of dragging the map to it. Nil
+    /// means the address did not geocode, which the caller should treat as "keep
+    /// the pin where it is" rather than as an error worth blocking on.
+    static func locate(address: String) async -> CLLocationCoordinate2D? {
+        let trimmed = address.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return await geocode(query: trimmed)
+    }
+
+    /// Neighbourhood + street address for a coordinate that is already trusted.
+    ///
+    /// The whole of `resolve` exists to *find* a venue. When the user picked one
+    /// out of Apple Maps themselves there is nothing left to find — but a pin
+    /// still needs a neighbourhood label, and MapKit's search result does not
+    /// carry one. This is that one step, on its own.
+    static func describe(
+        coordinate: CLLocationCoordinate2D
+    ) async -> (neighborhood: String?, address: String?) {
+        await reverseGeocode(coordinate: coordinate)
+    }
+
     // MARK: - Steps
 
     /// Read PHAsset locations, cluster them and return the tightest cluster's center.

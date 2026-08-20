@@ -414,6 +414,7 @@ struct RemoteVisitWithRelations: Decodable, Identifiable, Sendable {
     var updatedAt: Date?
     var place: RemotePlace?
     var photos: [RemoteVisitPhoto]
+    var tagged: [RemoteVisitTag]
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -433,6 +434,7 @@ struct RemoteVisitWithRelations: Decodable, Identifiable, Sendable {
         case updatedAt    = "updated_at"
         case place
         case photos
+        case tagged
     }
 
     init(from decoder: any Decoder) throws {
@@ -456,9 +458,54 @@ struct RemoteVisitWithRelations: Decodable, Identifiable, Sendable {
         updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt)
         place = try container.decodeIfPresent(RemotePlace.self, forKey: .place)
         photos = try container.decodeIfPresent([RemoteVisitPhoto].self, forKey: .photos) ?? []
+        tagged = try container.decodeIfPresent([RemoteVisitTag].self, forKey: .tagged) ?? []
     }
 
     var isDeleted: Bool { deletedAt != nil }
+}
+
+/// A `visit_tags` row with the tagged person's profile joined in, as it arrives
+/// on the pull's embedded select.
+///
+/// The profile half is its own nested type rather than the full `Profile` DTO:
+/// the embed asks for four columns, and `Profile` requires `created_at` and
+/// `updated_at`, so decoding into it would throw on every row.
+struct RemoteVisitTag: Decodable, Sendable {
+    /// Present even when the profile embed comes back null — a deleted account
+    /// part-way through its cascade — so the row can still be matched against a
+    /// local one and removed.
+    var userID: UUID
+    var createdAt: Date?
+    var profile: TaggedProfile?
+
+    struct TaggedProfile: Decodable, Sendable {
+        var id: UUID
+        var username: String?
+        var displayName: String?
+        var avatarURL: String?
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case username
+            case displayName = "display_name"
+            case avatarURL   = "avatar_url"
+        }
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case userID    = "user_id"
+        case createdAt = "created_at"
+        case profile
+    }
+
+    var person: PersonSummary {
+        PersonSummary(
+            id: userID,
+            username: profile?.username,
+            displayName: profile?.displayName,
+            avatarURL: profile?.avatarURL
+        )
+    }
 }
 
 // MARK: - Friendship

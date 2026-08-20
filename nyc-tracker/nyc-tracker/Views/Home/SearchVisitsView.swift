@@ -15,7 +15,13 @@ struct SearchVisitsView: View {
         _openedVisit = openedVisit
         _visits = Query(
             filter: LocalStore.visitsPredicate(for: userID),
-            sort: [SortDescriptor(\Visit.visitedOn, order: .reverse)]
+            sort: [
+                SortDescriptor(\Visit.visitedOn, order: .reverse),
+                // Upload order breaks a tie. A user backfilling several
+                // places to the same day would otherwise get an order
+                // SwiftData is free to change between launches.
+                SortDescriptor(\Visit.createdAt, order: .reverse)
+            ]
         )
     }
 
@@ -70,7 +76,7 @@ struct SearchVisitsView: View {
                 .padding(.horizontal, 10)
             }
             .contentMargins(.top, 0, for: .scrollContent)
-            .background(Color.black)
+            .background(Color(uiColor: .systemBackground))
             .appSearchable(text: $query, prompt: "Name, tag, vibe, dish, description…")
             .onChange(of: query) { _, _ in
                 aiOrderedIDs = nil

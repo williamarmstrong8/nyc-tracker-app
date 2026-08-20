@@ -14,11 +14,11 @@ extension View {
     /// installed after the navigation transition, so the field's glass fills in
     /// a beat late over whatever was sliding away. Sheets that own their
     /// `NavigationStack` (map search, Add friends) present the field on frame
-    /// one, over `.presentationBackground(.black)`.
+    /// one, over a matching `.presentationBackground`.
     ///
-    /// The app runs in `.preferredColorScheme(.dark)` throughout and every page
-    /// behind a search field is black, so the background is black rather than a
-    /// material — a material would sample the content and land somewhere else.
+    /// The colour is `systemBackground` rather than a material: every page
+    /// behind a search field paints itself the same colour, and a material
+    /// would sample the content and land somewhere else.
     func appSearchable(text: Binding<String>, prompt: String) -> some View {
         self
             .searchable(
@@ -30,7 +30,7 @@ extension View {
             // focused instead of collapsing the bar down to the field.
             .searchPresentationToolbarBehavior(.avoidHidingContent)
             .scrollEdgeEffectHidden(true, for: .top)
-            .toolbarBackground(.black, for: .navigationBar)
+            .toolbarBackground(Color(uiColor: .systemBackground), for: .navigationBar)
             .toolbarBackgroundVisibility(.visible, for: .navigationBar)
     }
 }

@@ -56,7 +56,13 @@ struct SharePlacePicker: View {
         self.onPick = onPick
         _visits = Query(
             filter: LocalStore.visitsPredicate(for: userID),
-            sort: [SortDescriptor(\Visit.visitedOn, order: .reverse)]
+            sort: [
+                SortDescriptor(\Visit.visitedOn, order: .reverse),
+                // Upload order breaks a tie. A user backfilling several
+                // places to the same day would otherwise get an order
+                // SwiftData is free to change between launches.
+                SortDescriptor(\Visit.createdAt, order: .reverse)
+            ]
         )
     }
 

@@ -68,11 +68,10 @@ struct DiscoverView: View {
                             router.showMap()
                         }
                     )
-                    .toolbarBackground(.black, for: .navigationBar)
+                    .toolbarBackground(Color(uiColor: .systemBackground), for: .navigationBar)
                     .toolbarBackgroundVisibility(.visible, for: .navigationBar)
                 }
-                .preferredColorScheme(.dark)
-                .presentationBackground(.black)
+                .presentationBackground(Color(uiColor: .systemBackground))
             }
         }
         .task { feed.refresh() }
@@ -205,7 +204,14 @@ private struct FeedCard: View {
     let item: FeedItem
     var onOpenPlace: () -> Void
 
+    @Environment(AuthManager.self) private var auth
+
     private var visit: FriendVisit { item.visit }
+
+    /// Renders the reader as "you" in the tag line instead of their own display
+    /// name. Nil while the profile is still loading, which just means the row
+    /// falls back to a name for one frame.
+    private var viewerID: UUID? { auth.state.profile?.id }
 
     private var photoSources: [PhotoView.Source] {
         visit.photos
@@ -328,6 +334,15 @@ private struct FeedCard: View {
                 .foregroundStyle(.primary)
                 .lineLimit(2)
                 .multilineTextAlignment(.leading)
+
+            // Directly under the venue name, above the write-up: who was there
+            // is part of what the entry is, not a footnote to it.
+            TaggedPeopleRow(
+                people: visit.tagged.map(\.person),
+                font: .subheadline,
+                viewerID: viewerID
+            )
+            .padding(.top, 2)
 
             if let summaryText {
                 Text(summaryText)

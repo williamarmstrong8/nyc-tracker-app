@@ -469,7 +469,37 @@ final class SocialDemoMode {
     }
 
     private var allFriendVisits: [FriendVisit] {
-        friendIDs.flatMap { visitsByUser[$0] ?? [] }
+        friendIDs.flatMap { visitsByUser[$0] ?? [] }.map(taggingViewerIfListed)
+    }
+
+    /// Visits the sample cast "tagged the viewer in".
+    ///
+    /// Seeded data cannot name a real account: the cast is fixed at build time
+    /// and the signed-in user's id is only known once someone actually signs in.
+    /// So the relationship is stored as a list of visit ids here and the viewer
+    /// is spliced in at read time — which is what gives the profile's Tagged tab
+    /// something to show without a second real account.
+    private static let viewerTaggedVisitIDs: Set<UUID> = [id(30), id(40), id(60)]
+
+    private func taggingViewerIfListed(_ visit: FriendVisit) -> FriendVisit {
+        guard let me = signedInUserID,
+              Self.viewerTaggedVisitIDs.contains(visit.visitID),
+              !visit.tagged.contains(where: { $0.id == me })
+        else { return visit }
+
+        var copy = visit
+        copy.tagged.append(
+            TaggedPerson(id: me, username: nil, displayName: "You", avatarURL: nil)
+        )
+        return copy
+    }
+
+    /// Visits in which this person was tagged by someone else, newest first.
+    func taggedVisits(of userID: UUID) -> [FriendVisit] {
+        allFriendVisits
+            .filter { $0.visitKind == .visited }
+            .filter { visit in visit.tagged.contains { $0.id == userID } }
+            .sorted { $0.visitedAt > $1.visitedAt }
     }
 
     private var friendPlaceCounts: [UUID: Int] {
@@ -569,7 +599,8 @@ final class SocialDemoMode {
                           summary: "Got there at 4:40 and still waited an hour. The calzone is the move — one is enough for two if you pretend it isn't.",
                           quote: "One calzone, two people, no leftovers. That's the ratio.",
                           tags: ["pizza", "date-night", "worth-the-wait"],
-                          rating: "loved"),
+                          rating: "loved",
+                          tagged: [dev, riley]),
                 makeVisit(id: Self.id(31), person: maya, place: Self.lartusi, daysAgo: 5,
                           title: "West Village pasta night",
                           summary: "The cacio e pepe was exactly as loud with pepper as it should be. Sat at the bar and watched the open kitchen the whole time.",
@@ -629,14 +660,16 @@ final class SocialDemoMode {
                           title: "First slice in the new neighborhood",
                           summary: "The pepperoni cup is not a rumor. Ate it standing on the sidewalk and did not regret the oil on my shirt.",
                           tags: ["pizza", "solo"],
-                          rating: "loved"),
+                          rating: "loved",
+                          tagged: [maya]),
             ],
             jules.id: [
                 makeVisit(id: Self.id(70), person: jules, place: Self.dante, daysAgo: 12,
                           title: "Negroni, then another",
                           summary: "Sat outside even though it was almost too cold. The frozen one is a gimmick that works.",
                           tags: ["cocktails", "patio"],
-                          rating: "liked"),
+                          rating: "liked",
+                          tagged: [sam]),
             ],
         ]
 
@@ -875,7 +908,8 @@ final class SocialDemoMode {
         quote: String? = nil,
         transcript: String? = nil,
         tags: [String],
-        rating: String?
+        rating: String?,
+        tagged: [DemoPerson] = []
     ) -> FriendVisit {
         FriendVisit(
             visitID: id,
@@ -899,7 +933,10 @@ final class SocialDemoMode {
             username: person.username,
             displayName: person.displayName,
             avatarURL: nil,
-            photos: kind == "visited" ? [demoPhoto(forVisit: id)] : []
+            photos: kind == "visited" ? [demoPhoto(forVisit: id)] : [],
+            tagged: tagged.map {
+                TaggedPerson(id: $0.id, username: $0.username, displayName: $0.displayName, avatarURL: nil)
+            }
         )
     }
 
@@ -1070,7 +1107,8 @@ extension FriendVisit {
         username: String?,
         displayName: String?,
         avatarURL: String?,
-        photos: [FriendVisitPhoto]
+        photos: [FriendVisitPhoto],
+        tagged: [TaggedPerson] = []
     ) {
         self.visitID = visitID
         self.visitedAt = visitedAt
@@ -1094,6 +1132,7 @@ extension FriendVisit {
         self.displayName = displayName
         self.avatarURL = avatarURL
         self.photos = photos
+        self.tagged = tagged
     }
 }
 

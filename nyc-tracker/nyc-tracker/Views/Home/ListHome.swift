@@ -30,7 +30,13 @@ struct ListHome: View {
         _path = path
         _visits = Query(
             filter: LocalStore.visitsPredicate(for: userID),
-            sort: [SortDescriptor(\Visit.visitedOn, order: .reverse)]
+            sort: [
+                SortDescriptor(\Visit.visitedOn, order: .reverse),
+                // Upload order breaks a tie. A user backfilling several
+                // places to the same day would otherwise get an order
+                // SwiftData is free to change between launches.
+                SortDescriptor(\Visit.createdAt, order: .reverse)
+            ]
         )
     }
 
@@ -113,7 +119,7 @@ private struct CategoryTile: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Color.clear
-                .aspectRatio(4 / 3, contentMode: .fit)
+                .aspectRatio(3 / 4, contentMode: .fit)
                 .overlay {
                     if let previewPhoto {
                         PhotoView(source: PhotoView.Source(photo: previewPhoto, wantsThumbnail: true), contentMode: .fill)

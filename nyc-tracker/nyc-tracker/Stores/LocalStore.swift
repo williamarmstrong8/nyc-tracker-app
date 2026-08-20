@@ -15,6 +15,7 @@ enum LocalStore {
         Place.self,
         Visit.self,
         Photo.self,
+        VisitTag.self,
         PendingDeletion.self
     ]
 
@@ -97,7 +98,7 @@ struct VisitRepository {
         self.userID = userID
     }
 
-    func insert(place: Place, visit: Visit, photos: [Photo]) {
+    func insert(place: Place, visit: Visit, photos: [Photo], tagged: [PersonSummary] = []) {
         for photo in photos {
             photo.visit = visit
         }
@@ -110,11 +111,85 @@ struct VisitRepository {
         context.insert(place)
         context.insert(visit)
         photos.forEach { context.insert($0) }
+        applyTags(tagged, to: visit)
         try? context.save()
+    }
+
+    /// Replace a visit's tagged people, then re-queue it.
+    ///
+    /// The whole set is rewritten rather than diffed. Tag sets are single digits,
+    /// the rows carry no state worth preserving across an edit, and `SyncEngine`
+    /// replaces them wholesale upstream anyway — a diff here would only be a
+    /// second place for the two to disagree.
+    func setTags(_ people: [PersonSummary], on visit: Visit) {
+        applyTags(people, to: visit)
+        visit.markDirty()
+        try? context.save()
+    }
+
+    private func applyTags(_ people: [PersonSummary], to visit: Visit) {
+        for existing in Array(visit.taggedPeople) {
+            context.delete(existing)
+        }
+
+        for (index, person) in people.enumerated() {
+            let tag = VisitTag(
+                userID: person.id,
+                username: person.username,
+                displayName: person.displayName,
+                avatarURL: person.avatarURL,
+                order: index
+            )
+            context.insert(tag)
+            tag.visit = visit
+        }
     }
 
     func save() {
         try? context.save()
+    }
+
+    /// Save a want-to-try straight from a venue the user found in Apple Maps.
+    ///
+    /// The capture flow's own want-to-try path (`WantToTryView`) has to *guess*
+    /// the venue from a typed name, photos, or OCR off a storefront sign. This
+    /// one starts from an `MKMapItem` the user picked by hand, so there is
+    /// nothing to infer: the name, coordinate, category and POI id all come
+    /// from MapKit, and the entry is complete the moment it is created.
+    ///
+    /// Returns the new visit so the caller can pan the map to it — or the
+    /// existing one, if this venue is already on the list. Saving the same place
+    /// twice puts two pins at identical coordinates, which reads as a bug rather
+    /// than as emphasis.
+    @discardableResult
+    func insertWantToTry(
+        from candidate: VenueCandidate,
+        neighborhood: String?
+    ) -> Visit {
+        if let existing = existingWantToTry(matching: candidate) {
+            return existing
+        }
+
+        let place = Place(
+            name: candidate.name,
+            category: candidate.category,
+            neighborhood: neighborhood ?? "NYC",
+            lat: candidate.coordinate.latitude,
+            lng: candidate.coordinate.longitude,
+            externalPOIId: candidate.externalPOIId
+        )
+
+        let visit = Visit(
+            title: candidate.name,
+            address: candidate.address,
+            // `.manual` rather than `.device`: the coordinate came from a venue
+            // the user chose, not from where the phone happened to be.
+            locationSource: .manual,
+            kind: .wantToTry
+        )
+
+        insert(place: place, visit: visit, photos: [])
+        return visit
     }
 
     /// Persist an edit to an existing visit and re-queue it for upload.
@@ -125,6 +200,32 @@ struct VisitRepository {
     func saveEdit(to visit: Visit) {
         visit.markDirty()
         try? context.save()
+    }
+
+    /// An unvisited want-to-try for the same venue, if there is one.
+    ///
+    /// Matched on `externalPOIId` only — no name-and-distance fallback like
+    /// `existingVisitedVisit` needs. Both sides of this comparison came from a
+    /// MapKit result the user tapped, so either the identifiers match or these
+    /// genuinely are two different places.
+    private func existingWantToTry(matching candidate: VenueCandidate) -> Visit? {
+        guard let poiID = candidate.externalPOIId, !poiID.isEmpty else { return nil }
+
+        let places: [Place]
+        if let userID {
+            places = (try? context.fetch(
+                FetchDescriptor<Place>(predicate: LocalStore.placesPredicate(for: userID))
+            )) ?? []
+        } else {
+            places = (try? context.fetch(FetchDescriptor<Place>())) ?? []
+        }
+
+        return places
+            .first { $0.externalPOIId == poiID }?
+            .visits
+            .filter { $0.kind == .wantToTry }
+            .sorted { $0.createdAt > $1.createdAt }
+            .first
     }
 
     /// Look for a `Visit` (kind == .visited) at a place the user has already logged, so a repeat
@@ -176,7 +277,8 @@ struct VisitRepository {
         topQuote: String,
         rating: Rating?,
         returnIntent: ReturnIntent?,
-        visitedOn: Date
+        visitedOn: Date,
+        tagged: [PersonSummary] = []
     ) {
         let startOrder = (visit.photos.map(\.order).max() ?? -1) + 1
         for (offset, photo) in photos.enumerated() {
@@ -204,6 +306,16 @@ struct VisitRepository {
         if let rating { visit.rating = rating }
         if let returnIntent { visit.returnIntent = returnIntent }
         visit.visitedOn = max(visit.visitedOn, visitedOn)
+
+        // Additive, like tags and description: someone tagged on the first
+        // occasion was still there for it, so a second occasion adds names
+        // rather than replacing the list.
+        if !tagged.isEmpty {
+            let existingIDs = Set(visit.taggedPeople.map(\.userID))
+            let merged = visit.taggedPeopleOrdered.map(\.person)
+                + tagged.filter { !existingIDs.contains($0.id) }
+            applyTags(merged, to: visit)
+        }
 
         // The merged entry is new content the cloud hasn't seen, including the
         // freshly attached photos — which still need their objects uploaded.

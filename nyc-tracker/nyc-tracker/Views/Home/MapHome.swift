@@ -76,7 +76,13 @@ struct MapHome: View {
         self.userID = userID
         _visits = Query(
             filter: LocalStore.visitsPredicate(for: userID),
-            sort: [SortDescriptor(\Visit.visitedOn, order: .reverse)]
+            sort: [
+                SortDescriptor(\Visit.visitedOn, order: .reverse),
+                // Upload order breaks a tie. A user backfilling several
+                // places to the same day would otherwise get an order
+                // SwiftData is free to change between launches.
+                SortDescriptor(\Visit.createdAt, order: .reverse)
+            ]
         )
     }
 
@@ -279,11 +285,10 @@ struct MapHome: View {
                         onDismiss: { presentedSheet = nil },
                         onShowOnMap: { presentedSheet = nil }
                     )
-                    .toolbarBackground(.black, for: .navigationBar)
+                    .toolbarBackground(Color(uiColor: .systemBackground), for: .navigationBar)
                     .toolbarBackgroundVisibility(.visible, for: .navigationBar)
                 }
-                .preferredColorScheme(.dark)
-                .presentationBackground(.black)
+                .presentationBackground(Color(uiColor: .systemBackground))
             } else {
                 MissingPlaceSheet()
             }

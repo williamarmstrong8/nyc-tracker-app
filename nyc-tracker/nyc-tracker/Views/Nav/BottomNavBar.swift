@@ -53,6 +53,7 @@ struct BottomNavBar: View {
     var onFriends: () -> Void
     var onLogVisit: () -> Void
     var onWantToTry: () -> Void
+    var onFindPlace: () -> Void
     var onProfile: () -> Void
 
     @Environment(AuthManager.self) private var auth
@@ -99,8 +100,10 @@ struct BottomNavBar: View {
                 )
             }
 
-            // Plus is not glass — a solid white disc — so it lives outside the
-            // bar's GlassEffectContainer and won't bleed tint into the pill.
+            // Plus is not glass — a solid disc in the page's inverse colour, so
+            // it reads against the page in either appearance — and it lives
+            // outside the bar's GlassEffectContainer so it can't bleed tint
+            // into the pill.
             ZStack {
                 GlassEffectContainer(spacing: 20) { navBar }
                 plusButton
@@ -137,8 +140,11 @@ struct BottomNavBar: View {
         return inset ?? 34
     }
 
+    /// Three ways in, in the order they are reached for: from photos you just
+    /// took, from a place you already know the name of, and from Apple Maps when
+    /// you have neither.
     private var newEntryCards: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 10) {
             newEntryCard(
                 title: "Log a visit",
                 systemImage: "photo.on.rectangle.angled",
@@ -155,6 +161,15 @@ struct BottomNavBar: View {
             ) {
                 dismissNewEntryOptions()
                 onWantToTry()
+            }
+
+            newEntryCard(
+                title: "Find a place",
+                systemImage: "mappin.and.ellipse",
+                glassID: "action-find"
+            ) {
+                dismissNewEntryOptions()
+                onFindPlace()
             }
         }
     }
@@ -174,6 +189,10 @@ struct BottomNavBar: View {
                     .font(.title2.weight(.semibold))
                 Text(title)
                     .font(.subheadline.weight(.semibold))
+                    // Three cards across leaves ~100pt each. Shrinking beats
+                    // truncating: "Want to tr…" reads as a bug.
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
             }
             .frame(maxWidth: .infinity)
             .padding(.vertical, 18)
@@ -413,9 +432,9 @@ struct BottomNavBar: View {
         } label: {
                 Image(systemName: showNewEntryOptions ? "xmark" : "plus")
                 .font(.system(size: 28, weight: .bold))
-                .foregroundStyle(.black)
+                .foregroundStyle(Color(uiColor: .systemBackground))
                 .frame(width: Self.plusSize, height: Self.plusSize)
-                .background(Circle().fill(.white))
+                .background(Circle().fill(Color(uiColor: .label)))
                 .contentTransition(.symbolEffect(.replace))
         }
         .buttonStyle(.plain)

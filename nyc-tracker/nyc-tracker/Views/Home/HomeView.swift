@@ -68,8 +68,7 @@ struct HomeView: View {
         .animation(.default, value: showFloatingControls)
         .sheet(isPresented: $showSearch) {
             SearchVisitsView(userID: userID, openedVisit: $openedVisit)
-                .preferredColorScheme(.dark)
-                .presentationBackground(.black)
+                .presentationBackground(Color(uiColor: .systemBackground))
         }
     }
 }

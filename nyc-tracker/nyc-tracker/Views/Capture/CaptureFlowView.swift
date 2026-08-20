@@ -26,7 +26,8 @@ struct CaptureFlowView: View {
                 case .venuePicker:
                     VenuePickerView(
                         candidates: coordinator.venueCandidates,
-                        biasCoordinate: coordinator.resolvedCoordinate
+                        biasCoordinate: coordinator.resolvedCoordinate,
+                        typedName: coordinator.nameInput.isEmpty ? nil : coordinator.nameInput
                     ) { picked in
                         coordinator.applyVenue(picked)
                     }

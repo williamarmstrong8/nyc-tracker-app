@@ -17,6 +17,7 @@ struct ContentView: View {
     @Environment(SocialGraph.self) private var graph
     @Environment(ChatStore.self) private var chat
     @Environment(SyncEngine.self) private var sync
+    @Environment(\.modelContext) private var modelContext
 
     /// Owns the active tab and home mode. An observable rather than `@State`
     /// because "View on map" on a friend's profile has to change the tab from
@@ -52,7 +53,27 @@ struct ContentView: View {
     /// Bindings that drive the "log a visit" and "want to try" entry points.
     @State private var showPhotosPicker = false
     @State private var pickerSelection: [PhotosPickerItem] = []
-    @State private var showWantToTry = false
+
+    /// The "+" menu's one sheet slot.
+    ///
+    /// A single enum rather than a `Bool` per destination, for the reason
+    /// `MapHome.MapSheet` spells out: two `.sheet(isPresented:)` modifiers on one
+    /// view is the arrangement where the second can silently win, and one slot
+    /// also makes it impossible to ask for both at once.
+    private enum EntrySheet: String, Identifiable {
+        case wantToTry
+        case placeSearch
+
+        var id: String { rawValue }
+    }
+
+    @State private var entrySheet: EntrySheet?
+
+    /// A venue picked out of Apple Maps that is on its way into the capture
+    /// flow. Held here rather than passed straight through because the photo
+    /// picker has to open first, and it cannot open until the search sheet has
+    /// finished dismissing.
+    @State private var pendingVenue: VenueCandidate?
 
     private let enricher: EnricherProtocol = FoundationModelsEnricher()
 
@@ -107,7 +128,8 @@ struct ContentView: View {
                         pickerSelection = []
                         showPhotosPicker = true
                     },
-                    onWantToTry: { showWantToTry = true },
+                    onWantToTry: { entrySheet = .wantToTry },
+                    onFindPlace: { entrySheet = .placeSearch },
                     onProfile: { router.activeTab = .profile }
                 )
                 // Slide the bar itself, not the full-height container below —
@@ -170,11 +192,35 @@ struct ContentView: View {
         )
         .onChange(of: showPhotosPicker) { _, isShown in
             // When the picker closes with photos selected, start the capture flow.
+            // Backing out of the picker cancels the entry — a visit needs at least
+            // one photo — and that includes discarding any venue the user had
+            // chosen on the way in.
             guard !isShown else { return }
             if !pickerSelection.isEmpty {
-                captureCoordinator.begin(with: pickerSelection)
+                captureCoordinator.begin(with: pickerSelection, venue: pendingVenue)
                 pickerSelection = []
             }
+            pendingVenue = nil
+        }
+        .sheet(item: $entrySheet) { sheet in
+            switch sheet {
+            case .wantToTry:
+                WantToTryView(userID: userID)
+            case .placeSearch:
+                PlaceSearchView(
+                    onLogVisit: { venue in pendingVenue = venue },
+                    onWantToTry: { venue in saveWantToTry(venue) }
+                )
+            }
+        }
+        // The picker is opened here rather than from inside the search sheet:
+        // presenting it while that sheet is still dismissing gives a picker
+        // stacked on a disappearing presenter, which on device ends up
+        // undismissable. Waiting for the dismissal to land avoids the race.
+        .onChange(of: entrySheet) { _, sheet in
+            guard sheet == nil, pendingVenue != nil else { return }
+            pickerSelection = []
+            showPhotosPicker = true
         }
         .fullScreenCover(isPresented: bindingForCapture()) {
             CaptureFlowView(
@@ -188,9 +234,6 @@ struct ContentView: View {
                 }
             )
         }
-        .sheet(isPresented: $showWantToTry) {
-            WantToTryView(userID: userID)
-        }
         .sheet(item: $openedVisit) { visit in
             NavigationStack {
                 ReadOnlyWriteUpView(
@@ -203,11 +246,10 @@ struct ContentView: View {
                         mapFocusVisitID = id
                     }
                 )
-                .toolbarBackground(.black, for: .navigationBar)
+                .toolbarBackground(Color(uiColor: .systemBackground), for: .navigationBar)
                 .toolbarBackgroundVisibility(.visible, for: .navigationBar)
             }
-            .preferredColorScheme(.dark)
-            .presentationBackground(.black)
+            .presentationBackground(Color(uiColor: .systemBackground))
             // Sheets don't always inherit `@State` Observable values injected
             // on the presenter; VisitFriendsSection needs these explicitly.
             .environment(graph)
@@ -215,6 +257,29 @@ struct ContentView: View {
             .environment(feed)
             .environment(socialStats)
             .environment(router)
+        }
+    }
+
+    /// Save a want-to-try straight from an Apple Maps result, then show it.
+    ///
+    /// No sheet, no confirmation step: everything the entry holds — name,
+    /// coordinate, category, address — came from the venue the user just tapped,
+    /// so there is nothing left to ask them. Panning the map to the new pin is
+    /// the receipt.
+    private func saveWantToTry(_ venue: VenueCandidate) {
+        Task {
+            let described = await LocationResolver.describe(coordinate: venue.coordinate)
+            let repository = VisitRepository(context: modelContext, userID: userID)
+            let visit = repository.insertWantToTry(
+                from: venue,
+                neighborhood: described.neighborhood
+            )
+            Haptics.success()
+            sync.requestSync(reason: .newLocalWrite)
+
+            openedVisit = nil
+            router.showMap()
+            mapFocusVisitID = visit.id
         }
     }
 

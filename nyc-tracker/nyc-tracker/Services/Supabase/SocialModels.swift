@@ -200,6 +200,30 @@ struct FriendVisitPhoto: Decodable, Identifiable, Hashable, Sendable {
     }
 }
 
+/// A person tagged in someone's visit, as the `tagged` jsonb array carries them.
+///
+/// Its own type rather than decoding straight into `PersonSummary` because the
+/// identity column upstream is `user_id`, not `id` — `PersonSummary` is an app
+/// type shared by half a dozen surfaces and does not get reshaped to match one
+/// RPC's column naming.
+struct TaggedPerson: Decodable, Identifiable, Hashable, Sendable {
+    let id: UUID
+    var username: String?
+    var displayName: String?
+    var avatarURL: String?
+
+    var person: PersonSummary {
+        PersonSummary(id: id, username: username, displayName: displayName, avatarURL: avatarURL)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id          = "user_id"
+        case username
+        case displayName = "display_name"
+        case avatarURL   = "avatar_url"
+    }
+}
+
 /// One visit as returned by `visits_in_bounds` — the visit, its place, and its
 /// author, denormalised into a flat row.
 struct FriendVisit: Decodable, Identifiable, Hashable, Sendable {
@@ -229,6 +253,9 @@ struct FriendVisit: Decodable, Identifiable, Hashable, Sendable {
     var avatarURL: String?
 
     var photos: [FriendVisitPhoto]
+    /// People the author said were there. Empty for a visit with nobody tagged,
+    /// and empty on any server that predates the `visit_tags` migration.
+    var tagged: [TaggedPerson]
 
     var id: UUID { visitID }
 
@@ -294,6 +321,7 @@ struct FriendVisit: Decodable, Identifiable, Hashable, Sendable {
         case displayName   = "display_name"
         case avatarURL     = "avatar_url"
         case photos
+        case tagged
     }
 
     init(from decoder: any Decoder) throws {
@@ -322,6 +350,7 @@ struct FriendVisit: Decodable, Identifiable, Hashable, Sendable {
         displayName = try container.decodeIfPresent(String.self, forKey: .displayName)
         avatarURL = try container.decodeIfPresent(String.self, forKey: .avatarURL)
         photos = try container.decodeIfPresent([FriendVisitPhoto].self, forKey: .photos) ?? []
+        tagged = try container.decodeIfPresent([TaggedPerson].self, forKey: .tagged) ?? []
     }
 }
 
@@ -402,6 +431,8 @@ struct SearchProfilesParams: Encodable, Sendable {
     }
 }
 
+/// Arguments for `user_visits` and `tagged_visits` — the two RPCs share a
+/// signature as well as a return shape.
 struct UserVisitsParams: Encodable, Sendable {
     var user: UUID
     var limit: Int

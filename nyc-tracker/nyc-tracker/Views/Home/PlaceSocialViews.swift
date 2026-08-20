@@ -462,7 +462,10 @@ struct RecommendedPlaceSheet: View {
         let predicate = LocalStore.visitsPredicate(for: userID)
         let descriptor = FetchDescriptor<Visit>(
             predicate: predicate,
-            sortBy: [SortDescriptor(\Visit.visitedOn, order: .reverse)]
+            sortBy: [
+                SortDescriptor(\Visit.visitedOn, order: .reverse),
+                SortDescriptor(\Visit.createdAt, order: .reverse)
+            ]
         )
         let visits = (try? modelContext.fetch(descriptor)) ?? []
         return visits.filter { $0.place?.remotePlaceID == place.id }

@@ -24,6 +24,11 @@ Defined in `nyc-tracker/Models/Models.swift`.
   `photos [Photo]` (cascade).
 - `Photo` (class): `id`, `relativePath?` (on-disk file), `assetLocalIdentifier?` (PHAsset id),
   `order`, `sfSymbol?` (deprecated seed placeholder), `visit (Visit?)`.
+- `VisitTag` (class): one tagged person — `userID`, `username?`, `displayName?`, `avatarURL?`,
+  `order`, `visit (Visit?)`. Mirrors `visit_tags` upstream. The name and avatar are denormalised
+  on purpose: resolving ids through `SocialGraph` at render time loses the label the moment a
+  friendship ends. Reach it through `Visit.taggedPeopleOrdered` — SwiftData relationships are
+  unordered sets.
 
 Enums (`PlaceCategory`, `Rating`, `ReturnIntent`, `LocationSource`) are stored as raw strings on the
 model and exposed via computed properties.
@@ -38,6 +43,21 @@ model and exposed via computed properties.
 - Never stack glass on glass or add `.background/.blur/.opacity/.clipShape` on a glass view.
 - Respect Reduce Transparency for accessibility (SwiftUI does this by default when using system materials).
 - Aesthetic: minimal, calm, generous breathing room, system fonts, subtle depth. Light haptic on confirm/save.
+- **The app follows the system appearance — it is not dark-only.** Nothing sets
+  `.preferredColorScheme`, and no page paints itself `Color.black` / `Color.white`. Surfaces use
+  `Color(uiColor: .systemBackground)` (pages, sheet `presentationBackground`, opaque
+  `toolbarBackground`), `.secondarySystemGroupedBackground` (raised cards, chat bubbles), and
+  `.primary` / `.secondary` for text. A literal white or black is only correct on top of a
+  saturated fill that doesn't change with the appearance — white on the accent capsule, on a
+  category-tinted map pin, on the red badge, on the blue outgoing bubble. `SearchHarness.swift`
+  is the one exception, and it's a dev-only snapshot harness behind the `-searchHarness` launch
+  argument.
+- **Photos are always a 3:4 portrait center-crop.** Every rectangular photo surface (feed card,
+  write-up hero, capture preview, category tile, chat place card, share sheet, picker strips) is a
+  `Color.clear.aspectRatio(3 / 4, contentMode: .fit).overlay { PhotoView(contentMode: .fill) }`
+  box (or a 3:4 fixed frame) plus a clip, so landscape and portrait uploads sit at the same size.
+  The only square photo surfaces are the 3-column profile/friend activity grids and small row
+  thumbnails.
 
 ## Screens & flow
 
@@ -46,19 +66,43 @@ model and exposed via computed properties.
    opens the read-only Write-up. Top-floating segmented **Map | List** glass toggle.
 2. **Bottom nav** (floating Liquid Glass, grouped in a `GlassEffectContainer`): Map (left), big
    prominent circular **+** (center, `.glassProminent`, raised), Profile (right).
-3. **Bottom nav plus button** is a `Menu` with two options:
+3. **Bottom nav plus button** opens three cards:
    - **Log a visit** → opens `PhotosPicker` directly from ContentView; when photos are picked the
      capture flow starts at the Details stage (no placeholder screen in front of the picker).
+     **At least one photo is required** — backing out of the picker cancels the entry, and there
+     is no way to reopen the picker or drop a photo once the flow has started.
    - **Want to try** → `WantToTryView` sheet with just Name/Address/Tags. Runs the same
      `LocationResolver` to pin the map, saves a `Visit` with `kind = .wantToTry` (no photos, no
      transcript).
+   - **Find a place** → `PlaceSearchView`: `MKLocalSearchCompleter` as-you-type over Apple Maps,
+     resolved to a `VenueCandidate` on tap (one `MKLocalSearch` per tap, not per keystroke). The
+     result card offers **Log a visit** — opens the photo picker, then the capture flow with
+     `CaptureCoordinator.preselectedVenue` set, which skips venue resolution *and* the venue
+     picker entirely — or **Want to try**, which saves immediately via
+     `VisitRepository.insertWantToTry` and pans the map to the new pin. The preselected path
+     ignores photo GPS on purpose: the user named the venue, and dinner photos are often taken
+     somewhere else. A permanent "Can't find it? Drop a pin" row sits under the results.
+
+   **Places Apple Maps doesn't have** — trucks, stalls, pop-ups — go through `DropPinView`
+   (`Views/Capture/`), reachable from the venue picker and from place search. The map moves under
+   a fixed centre marker rather than the pin being draggable, so the target is never under the
+   user's thumb; the address field is filled by reverse geocoding until the user types in it, and
+   "Move the pin to this address" geocodes the other way. The `VenueCandidate` it produces has
+   `externalPOIId == nil`, which is the signal throughout the app that a place came from a person
+   rather than from Apple; server-side dedupe falls back to name + geohash, so two people pinning
+   the same truck still land on one `places` row.
+
+   The three destinations share one `.sheet(item:)` slot (`ContentView.EntrySheet`) for the same
+   reason `MapHome.MapSheet` exists — two `.sheet(isPresented:)` on one view is where the second
+   can silently win.
 4. **Capture flow** (for a real visit):
-   1. **Details** screen: photo strip, hold-to-record voice memo (real mic + on-device
-      transcription), optional Name/Address/Tags.
+   1. **Details** screen: photo strip, date, tag-people row, hold-to-record voice memo (real mic
+      + on-device transcription), optional Name/Address/Tags.
    2. **Submit** → **Enriching…** overlay while `LocationResolver` runs (name-first when a Name is
       given, photo-GPS-first otherwise) and `FoundationModelsEnricher` produces the write-up.
-   3. If MapKit returned >1 plausible venue and none is a confident match, a **Venue picker**
-      sheet appears with the top 3 (or "keep my name"). Otherwise, straight to write-up.
+   3. If MapKit returned no confident match, a **Venue picker** sheet appears with the top 3,
+      plus three escape hatches: search manually (`ManualVenueEntryView`), **drop a pin**
+      (`DropPinView`), or "keep my name". Otherwise, straight to write-up.
    4. **Write-up**: image carousel → title → tag chips → enriched body → pull quote → collapsible
       transcript. Edit round-trips into `EditWriteUpView`.
    5. **Confirm** persists `Place + Visit + Photos` via `VisitRepository` and returns to the map.
@@ -68,7 +112,30 @@ model and exposed via computed properties.
    category (restaurant / bar / cafe / bakery / other), and any subset of `VenueTag` tags. The
    badge next to the filter icon shows how many filters are active.
 
-6. **Read-only write-up** (opened from a map pin or list row) has an `ellipsis.circle` menu with:
+6. **Tagging people.** A visit can name the friends who were there. `TagPeopleField` +
+   `TagPeoplePicker` (both in `Views/Shared/`) appear on the capture Details screen and on both
+   edit screens; `TaggedPeopleRow` renders the result ("with Maya and Dev") on the feed card and
+   every write-up. **Friends only, and that is a server rule** — the insert policy on `visit_tags`
+   refuses a tag naming anyone the author is not accepted friends with, so a user-search picker
+   would mostly 403 on save. The tagged person can untag themselves (`VisitTagService.untagSelf`,
+   permitted by the delete policy); no UI hangs off that yet.
+
+7. **Profile tabs.** `ProfileTabPicker` puts an Activity | Tagged toggle above the photo grid on
+   both the signed-in profile and a friend's. Activity is that person's own entries; Tagged is
+   `tagged_visits(p_user)` — entries *other people* wrote naming them, so those cells carry the
+   author's avatar and open the friend write-up sheet, which has no edit or delete path.
+
+8. **Dates.** `VisitDateField` (`Views/Shared/`) sets `Visit.visitedOn` on the capture Details
+   screen and on both edit screens. It is optional in the only sense that matters: it is seeded to
+   now, so logging a place the day you went needs no input, and leaving it alone means the entry
+   sorts by when it was uploaded. Only the *day* is editable —
+   `DatePicker(displayedComponents: .date)` preserves the bound value's time-of-day, which is what
+   stops three entries backfilled to the same Saturday from colliding on midnight. Every surface
+   already ordered on `visitedOn` / `visited_at`; the local `@Query` declarations now carry
+   `createdAt` as a secondary descriptor so a same-instant tie still resolves to upload order.
+   Future dates are rejected by the picker's range — an entry ahead of now is a want-to-try.
+
+9. **Read-only write-up** (opened from a map pin or list row) has an `ellipsis.circle` menu with:
    Edit (opens `EditPersistedVisitView` bound directly to the SwiftData row), Move to want-to-try /
    Mark as visited, and Delete (with confirmation dialog). Delete also cleans up on-disk audio +
    photo files.
@@ -144,6 +211,10 @@ nyc-tracker/
 - `Views/Profile/ProfileView.swift` — still a placeholder with a disabled "Sign in" button. Wire
   Supabase Auth here.
 - Publishing / rating / return-intent are captured on the Visit but not yet synced.
+- `visit_tags` has no notification: being tagged is only discoverable by opening your own profile.
+  A push or an inbox row is the obvious next step and needs no schema change.
+- Nothing lets a tagged person remove their own tag from the UI. `VisitTagService.untagSelf` and
+  the delete policy that permits it both exist; only the button is missing.
 - `Services/LocationResolver.swift` — uses `CLGeocoder` (deprecated in iOS 26 in favor of
   `MKGeocodingRequest`/`MKReverseGeocodingRequest`). Warnings only; still works. Modernize when
   convenient.

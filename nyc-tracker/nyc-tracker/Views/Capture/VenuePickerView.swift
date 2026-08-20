@@ -13,6 +13,9 @@ import CoreLocation
 struct VenuePickerView: View {
     let candidates: [VenueCandidate]
     let biasCoordinate: CLLocationCoordinate2D?
+    /// What the user typed as the name, if anything. Pre-fills the pin-drop
+    /// screen so they don't type it twice.
+    var typedName: String? = nil
     /// Called with the confirmed candidate (or nil to explicitly keep the user's typed name).
     let onSelect: (VenueCandidate?) -> Void
 
@@ -50,12 +53,27 @@ struct VenuePickerView: View {
                 } label: {
                     Label("Search for a different place", systemImage: "magnifyingglass")
                 }
+                NavigationLink {
+                    DropPinView(
+                        initialCoordinate: biasCoordinate,
+                        initialName: typedName ?? ""
+                    ) { candidate in
+                        onSelect(candidate)
+                    }
+                } label: {
+                    Label("Drop a pin on the map", systemImage: "mappin.and.ellipse")
+                }
                 Button {
                     Haptics.tap()
                     onSelect(nil)
                 } label: {
                     Label("None of these — keep my name", systemImage: "square.and.pencil")
                 }
+            } footer: {
+                // Named rather than left to be discovered: this is the only path
+                // for a venue MapKit does not have, and "search harder" is the
+                // wrong advice for a food truck.
+                Text("Somewhere that isn't on the map — a truck, a stall, a pop-up — can be pinned by hand.")
             }
         }
         .listStyle(.insetGrouped)

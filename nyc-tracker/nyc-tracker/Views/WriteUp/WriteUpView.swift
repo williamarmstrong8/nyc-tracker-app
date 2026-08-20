@@ -14,14 +14,20 @@ struct WriteUpView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                PhotoCarousel(sources: coordinator.selectedItems.map { .pickerItem($0) })
-                    .frame(height: 320)
+                Color.clear
+                    .aspectRatio(3 / 4, contentMode: .fit)
+                    .overlay {
+                        PhotoCarousel(sources: coordinator.selectedItems.map { .pickerItem($0) })
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
                     .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
                     .padding(.horizontal, 16)
 
                 VStack(alignment: .leading, spacing: 14) {
                     Text(coordinator.draftTitle)
                         .font(.largeTitle.weight(.bold))
+
+                    TaggedPeopleRow(people: coordinator.taggedPeople)
 
                     if let neighborhood = coordinator.resolvedNeighborhood, !neighborhood.isEmpty {
                         Text(neighborhood)
@@ -66,8 +72,7 @@ struct WriteUpView: View {
             NavigationStack {
                 EditWriteUpView(coordinator: coordinator)
             }
-            .preferredColorScheme(.dark)
-            .presentationBackground(.black)
+            .presentationBackground(Color(uiColor: .systemBackground))
         }
     }
 
@@ -153,6 +158,17 @@ struct ReadOnlyWriteUpView: View {
                                 .foregroundStyle(.blue)
                         }
                     }
+
+                    TaggedPeopleRow(people: visit.taggedPeopleOrdered.map(\.person))
+
+                    // Shown because it is now something the user chose rather
+                    // than a timestamp the app happened to record.
+                    Label(
+                        visit.visitedOn.formatted(date: .abbreviated, time: .omitted),
+                        systemImage: "calendar"
+                    )
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
 
                     HStack(spacing: 6) {
                         if let neighborhood = visit.place?.neighborhood {
@@ -291,8 +307,7 @@ struct ReadOnlyWriteUpView: View {
             NavigationStack {
                 EditPersistedVisitView(visit: visit)
             }
-            .preferredColorScheme(.dark)
-            .presentationBackground(.black)
+            .presentationBackground(Color(uiColor: .systemBackground))
         }
         .confirmationDialog("Delete this entry?", isPresented: $showDeleteConfirm, titleVisibility: .visible) {
             Button("Delete", role: .destructive) {
@@ -342,6 +357,12 @@ struct FriendVisitWriteUpView: View {
     /// chat). Omitted on surfaces that have nowhere sensible to send it.
     var onShowOnMap: (() -> Void)? = nil
 
+    @Environment(AuthManager.self) private var auth
+
+    /// So a tag naming the reader reads "with you and Dev" rather than the
+    /// reader's own display name, which is how nobody refers to themselves.
+    private var viewerID: UUID? { auth.state.profile?.id }
+
     private var heroPhotoSource: PhotoView.Source? {
         visit.photos
             .sorted { $0.sortOrder < $1.sortOrder }
@@ -382,6 +403,18 @@ struct FriendVisitWriteUpView: View {
                             .foregroundStyle(.secondary)
                     }
                     .font(.subheadline)
+
+                    TaggedPeopleRow(
+                        people: visit.tagged.map(\.person),
+                        viewerID: viewerID
+                    )
+
+                    Label(
+                        visit.visitedAt.formatted(date: .abbreviated, time: .omitted),
+                        systemImage: "calendar"
+                    )
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
 
                     HStack(spacing: 6) {
                         if let neighborhood = nonEmpty(visit.neighborhood) {

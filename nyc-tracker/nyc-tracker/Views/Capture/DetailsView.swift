@@ -6,6 +6,7 @@ struct DetailsView: View {
     let enricher: EnricherProtocol
 
     @State private var recorder: any RecorderProtocol = SpeechRecorder()
+    @State private var showTagPeople = false
     @FocusState private var focusedField: Field?
 
     enum Field: Hashable { case address, name, tags }
@@ -14,6 +15,12 @@ struct DetailsView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 photoStrip
+
+                VisitDateField(date: $coordinator.visitedOn)
+
+                TagPeopleField(tagged: coordinator.taggedPeople) {
+                    showTagPeople = true
+                }
 
                 voiceMemoSection
 
@@ -33,6 +40,11 @@ struct DetailsView: View {
                 Button("Done") { focusedField = nil }
             }
         }
+        .sheet(isPresented: $showTagPeople) {
+            TagPeoplePicker(initialSelection: coordinator.taggedPeople) { picked in
+                coordinator.taggedPeople = picked
+            }
+        }
         .task {
             // Prewarm the on-device model so the first submit is snappier.
             await enricher.prewarm()
@@ -44,9 +56,12 @@ struct DetailsView: View {
     private var photoStrip: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 10) {
-                ForEach(coordinator.selectedItems, id: \.itemIdentifier) { item in
+                // Keyed by offset, not by `itemIdentifier`: the same library
+                // asset can legitimately be picked twice, and duplicate ForEach
+                // ids drop rows.
+                ForEach(Array(coordinator.selectedItems.enumerated()), id: \.offset) { _, item in
                     PhotoView(source: .pickerItem(item), contentMode: .fill)
-                        .frame(width: 140, height: 180)
+                        .frame(width: 140, height: 140 * 4 / 3)
                         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                 }
             }

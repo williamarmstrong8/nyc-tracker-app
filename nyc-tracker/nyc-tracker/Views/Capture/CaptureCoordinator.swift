@@ -24,6 +24,14 @@ final class CaptureCoordinator {
     var nameInput: String = ""
     var tagsInput: String = ""
     var transcript: String = ""
+    /// Friends the user says were there. Empty is the common case.
+    var taggedPeople: [PersonSummary] = []
+
+    /// When the visit happened. Seeded to now, so an entry logged the same day
+    /// needs no input; the user moves it when they are catching up on a place
+    /// they went to last week. Everything in the app orders on this, so leaving
+    /// it alone means "order me by when I uploaded", which is the right default.
+    var visitedOn: Date = Date()
 
     /// Audio file that backs the transcript, if any.
     var hadVoiceNote: Bool = false
@@ -36,6 +44,12 @@ final class CaptureCoordinator {
     var venueCandidates: [VenueCandidate] = []
     var chosenVenue: VenueCandidate?
     var rawPlaceGuess: String?
+
+    /// Set when the entry started from an Apple Maps search rather than from
+    /// photos. The venue is then already known, so `submitDetails` skips venue
+    /// resolution entirely instead of searching for a place the user has
+    /// already pointed at.
+    var preselectedVenue: VenueCandidate?
 
     // Produced by enrichment; edited by user in the write-up.
     var draftTitle: String = ""
@@ -53,9 +67,17 @@ final class CaptureCoordinator {
     var isPresented: Bool = false
 
     /// Begin the capture flow with a set of photos the user already picked from the library.
-    func begin(with items: [PhotosPickerItem]) {
+    ///
+    /// `venue` is non-nil when the entry began from an Apple Maps search, in
+    /// which case the name field is pre-filled and no venue picker is shown.
+    func begin(with items: [PhotosPickerItem], venue: VenueCandidate? = nil) {
         reset()
         selectedItems = items
+        preselectedVenue = venue
+        if let venue {
+            nameInput = venue.name
+            addressInput = venue.address ?? ""
+        }
         stage = .details
         isPresented = true
     }
@@ -66,6 +88,8 @@ final class CaptureCoordinator {
         nameInput = ""
         tagsInput = ""
         transcript = ""
+        taggedPeople = []
+        visitedOn = Date()
         hadVoiceNote = false
         resolvedCoordinate = nil
         resolvedNeighborhood = nil
@@ -74,6 +98,7 @@ final class CaptureCoordinator {
         venueCandidates = []
         chosenVenue = nil
         rawPlaceGuess = nil
+        preselectedVenue = nil
         draftTitle = ""
         draftTags = []
         draftDescription = ""
@@ -91,21 +116,30 @@ final class CaptureCoordinator {
         stage = .processing
 
         // 1) Location resolution
-        let assetIdentifiers = selectedItems.compactMap { $0.itemIdentifier }
-        let deviceLocation = await LocationProvider.shared.currentLocation()
-        let resolution = await LocationResolver.resolve(
-            assetIdentifiers: assetIdentifiers,
-            nameHint: nameInput.isEmpty ? nil : nameInput,
-            addressHint: addressInput.isEmpty ? nil : addressInput,
-            deviceLocation: deviceLocation
-        )
+        if let venue = preselectedVenue {
+            // Nothing to resolve. Photo GPS is deliberately ignored here: the
+            // user picked this venue by name, and photos of a dinner are often
+            // taken somewhere else entirely (or carry no location at all).
+            // Letting the resolver run would sometimes move the pin off the
+            // place they explicitly chose.
+            await applyPreselected(venue)
+        } else {
+            let assetIdentifiers = selectedItems.compactMap { $0.itemIdentifier }
+            let deviceLocation = await LocationProvider.shared.currentLocation()
+            let resolution = await LocationResolver.resolve(
+                assetIdentifiers: assetIdentifiers,
+                nameHint: nameInput.isEmpty ? nil : nameInput,
+                addressHint: addressInput.isEmpty ? nil : addressInput,
+                deviceLocation: deviceLocation
+            )
 
-        resolvedCoordinate = resolution.coordinate
-        resolvedNeighborhood = resolution.neighborhood
-        resolvedAddress = resolution.address
-        resolvedLocationSource = resolution.source
-        venueCandidates = resolution.candidates
-        chosenVenue = resolution.confidentPick
+            resolvedCoordinate = resolution.coordinate
+            resolvedNeighborhood = resolution.neighborhood
+            resolvedAddress = resolution.address
+            resolvedLocationSource = resolution.source
+            venueCandidates = resolution.candidates
+            chosenVenue = resolution.confidentPick
+        }
         rawPlaceGuess = nameInput.isEmpty ? nil : nameInput
         draftCategory = chosenVenue?.category ?? .restaurant
 
@@ -143,12 +177,30 @@ final class CaptureCoordinator {
         }
 
         // 3) If we don't have a confident venue pick, always show the picker so the user can
-        //    confirm, tap a candidate, or fall back to manual search.
+        //    confirm, tap a candidate, or fall back to manual search. A venue
+        //    the user chose off the map is already confirmed and skips it.
         if chosenVenue == nil {
             stage = .venuePicker
         } else {
             stage = .writeUp
         }
+    }
+
+    /// Seed the resolution fields from a venue the user chose in Apple Maps.
+    ///
+    /// Only the neighbourhood needs a round trip — MapKit search results carry a
+    /// name, a coordinate and an address, but no neighbourhood label, and that
+    /// is what list rows and map groupings display.
+    private func applyPreselected(_ venue: VenueCandidate) async {
+        chosenVenue = venue
+        venueCandidates = [venue]
+        resolvedCoordinate = venue.coordinate
+        resolvedAddress = venue.address
+        resolvedLocationSource = .manual
+
+        let described = await LocationResolver.describe(coordinate: venue.coordinate)
+        resolvedNeighborhood = described.neighborhood
+        resolvedAddress = venue.address ?? described.address
     }
 
     /// User picked a venue in the venue picker sheet; update the draft and advance.
@@ -190,7 +242,8 @@ final class CaptureCoordinator {
                 topQuote: draftTopQuote,
                 rating: draftRating,
                 returnIntent: draftReturnIntent,
-                visitedOn: Date()
+                visitedOn: visitedOn,
+                tagged: taggedPeople
             )
             Haptics.success()
             isPresented = false
@@ -207,7 +260,7 @@ final class CaptureCoordinator {
         )
 
         let visit = Visit(
-            visitedOn: Date(),
+            visitedOn: visitedOn,
             title: draftTitle,
             tags: draftTags,
             enrichedDescription: draftDescription,
@@ -225,7 +278,7 @@ final class CaptureCoordinator {
             kind: .visited
         )
 
-        repository.insert(place: place, visit: visit, photos: photoRows)
+        repository.insert(place: place, visit: visit, photos: photoRows, tagged: taggedPeople)
         Haptics.success()
         isPresented = false
         return visit

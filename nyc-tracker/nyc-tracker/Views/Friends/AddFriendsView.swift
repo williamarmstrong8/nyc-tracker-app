@@ -14,7 +14,7 @@ struct AddFriendsView: View {
     var body: some View {
         NavigationStack {
             UserSearchView(query: $query)
-                .background(Color.black)
+                .background(Color(uiColor: .systemBackground))
                 .navigationTitle("Add friends")
                 .navigationBarTitleDisplayMode(.inline)
                 .appSearchable(text: $query, prompt: "Name or username")
@@ -24,7 +24,6 @@ struct AddFriendsView: View {
                     }
                 }
         }
-        .preferredColorScheme(.dark)
-        .presentationBackground(.black)
+        .presentationBackground(Color(uiColor: .systemBackground))
     }
 }

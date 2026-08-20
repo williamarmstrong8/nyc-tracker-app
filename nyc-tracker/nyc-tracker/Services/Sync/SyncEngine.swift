@@ -317,7 +317,10 @@ final class SyncEngine {
             // ---- 4. Photo rows ----------------------------------------------
             try await upsertPhotoRows(for: visit)
 
-            // ---- 5. Done ----------------------------------------------------
+            // ---- 5. Tagged people -------------------------------------------
+            try await pushTags(for: visit)
+
+            // ---- 6. Done ----------------------------------------------------
             visit.syncState = .synced
             visit.remoteID = visit.id
             visit.lastSyncedAt = Date()
@@ -328,6 +331,32 @@ final class SyncEngine {
 
         } catch {
             record(error, on: visit)
+        }
+    }
+
+    /// Step 5 — replace `visit_tags` for this visit.
+    ///
+    /// Ordered after the visit upsert because the insert policy is an `exists`
+    /// against `visits`: tags for a row the server has never seen are refused.
+    ///
+    /// A *permanent* failure here does not fail the entry. The realistic cause
+    /// is that a friendship ended between tagging someone and this upload
+    /// reaching the server, at which point RLS refuses the write and will refuse
+    /// it on every retry — so holding the whole visit in the failed queue would
+    /// cost the user their photos and write-up over an attribution they can no
+    /// longer make. The tags are dropped locally instead, which converges the
+    /// mirror on what the server will actually accept. Transient failures still
+    /// rethrow and retry with everything else.
+    private func pushTags(for visit: Visit) async throws {
+        let taggedIDs = visit.taggedPeopleOrdered.map(\.userID)
+
+        do {
+            try await VisitTagService.replaceTags(on: visit.id, with: taggedIDs)
+        } catch {
+            guard case .permanent = SyncFailure.classify(error) else { throw error }
+            for tag in Array(visit.taggedPeople) {
+                context?.delete(tag)
+            }
         }
     }
 
@@ -553,7 +582,10 @@ final class SyncEngine {
         do {
             var query = client
                 .from("visits")
-                .select("*, place:places(*), photos:visit_photos(*)")
+                // The tagged embed is nested two deep: the join row, then
+                // the profile behind it, so a pulled entry carries the
+                // tagged person's name and avatar and not just their id.
+                .select(Self.visitPullSelect)
                 .eq("user_id", value: userID.uuidString)
 
             if let watermark {
@@ -587,6 +619,12 @@ final class SyncEngine {
             }
         }
     }
+
+    /// Columns and embeds the pull requests for each visit.
+    private static let visitPullSelect = "*"
+        + ", place:places(*)"
+        + ", photos:visit_photos(*)"
+        + ", tagged:visit_tags(user_id, created_at, profile:profiles(id, username, display_name, avatar_url))"
 
     /// Merge one remote row into the local store.
     ///
@@ -653,6 +691,50 @@ final class SyncEngine {
         }
 
         applyPhotos(row.photos, to: visit)
+        applyTags(row.tagged, to: visit)
+    }
+
+    /// Reconcile the tagged-people rows.
+    ///
+    /// Server wins outright, with no merge: a tag is a fact the author asserts
+    /// and the tagged person can retract, and both of those already happened
+    /// upstream by the time this runs. The local rows carry a copy of each
+    /// person's name and avatar, so this is also where a friend's display name
+    /// change reaches every entry they appear in.
+    private func applyTags(_ remote: [RemoteVisitTag], to visit: Visit) {
+        guard let context else { return }
+
+        // Two local rows for one person is not a state the writer can produce,
+        // but a store restored from a partial migration could hold one. Keeping
+        // the first and letting the duplicate fall through to the orphan sweep
+        // below is what repairs it.
+        var existing = Dictionary(
+            visit.taggedPeople.map { ($0.userID, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+
+        for (index, row) in remote.enumerated() {
+            let tag = existing.removeValue(forKey: row.userID) ?? {
+                let created = VisitTag(userID: row.userID)
+                context.insert(created)
+                created.visit = visit
+                return created
+            }()
+
+            tag.order = index
+            // Only overwrite the cached identity when the join actually returned
+            // one. A null profile embed means the account is mid-delete, and a
+            // name already on disk beats blanking it.
+            if let profile = row.profile {
+                tag.username = profile.username
+                tag.displayName = profile.displayName
+                tag.avatarURL = profile.avatarURL
+            }
+        }
+
+        for orphan in existing.values {
+            context.delete(orphan)
+        }
     }
 
     /// Reconcile photo rows.

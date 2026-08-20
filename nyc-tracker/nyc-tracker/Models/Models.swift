@@ -270,6 +270,17 @@ final class Visit {
     @Relationship(deleteRule: .cascade, inverse: \Photo.visit)
     var photos: [Photo] = []
 
+    /// People the author says were there with them.
+    ///
+    /// Mirrors `visit_tags` upstream. Each row carries the tagged person's name
+    /// and avatar alongside their id — denormalised on purpose. The alternative
+    /// is resolving ids against `SocialGraph` at render time, which is correct
+    /// only while the friendship lasts: unfriend someone and every entry you
+    /// were both in loses its label. A tag is a record of who was there, so it
+    /// keeps the name it was written with until a sync replaces it.
+    @Relationship(deleteRule: .cascade, inverse: \VisitTag.visit)
+    var taggedPeople: [VisitTag] = []
+
     init(
         id: UUID = UUID(),
         visitedOn: Date = Date(),
@@ -349,6 +360,60 @@ final class Visit {
     var locationSource: LocationSource {
         get { LocationSource(rawValue: locationSourceRaw) ?? .manual }
         set { locationSourceRaw = newValue.rawValue }
+    }
+
+    /// Tagged people in a stable order. SwiftData relationships are unordered
+    /// sets, so anything user-visible has to sort explicitly or the row of
+    /// avatars reshuffles between launches.
+    var taggedPeopleOrdered: [VisitTag] {
+        taggedPeople.sorted { ($0.order, $0.userID.uuidString) < ($1.order, $1.userID.uuidString) }
+    }
+}
+
+/// One person tagged in one visit — the local mirror of a `visit_tags` row.
+///
+/// Its own model rather than an array of ids on `Visit` because it carries the
+/// person's name and avatar too (see `Visit.taggedPeople`), and because the sync
+/// engine needs to diff the set to know which rows to delete upstream.
+@Model
+final class VisitTag {
+    /// The tagged person's `profiles.id`. Unique per visit, not globally —
+    /// the same person appears in many visits.
+    var userID: UUID
+    var username: String?
+    var displayName: String?
+    var avatarURL: String?
+    /// Position in the author's chosen order. Not synced: upstream ordering is
+    /// by `created_at`, which reproduces the same sequence on any device that
+    /// pulls the rows.
+    var order: Int
+
+    @Relationship var visit: Visit?
+
+    init(
+        userID: UUID,
+        username: String? = nil,
+        displayName: String? = nil,
+        avatarURL: String? = nil,
+        order: Int = 0,
+        visit: Visit? = nil
+    ) {
+        self.userID = userID
+        self.username = username
+        self.displayName = displayName
+        self.avatarURL = avatarURL
+        self.order = order
+        self.visit = visit
+    }
+
+    /// The shape every avatar and name view in the app already takes.
+    var person: PersonSummary {
+        PersonSummary(
+            id: userID,
+            username: username,
+            displayName: displayName,
+            avatarURL: avatarURL
+        )
     }
 }
 

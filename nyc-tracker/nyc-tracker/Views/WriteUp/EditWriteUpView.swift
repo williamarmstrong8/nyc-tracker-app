@@ -5,6 +5,7 @@ struct EditWriteUpView: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var tagsText: String = ""
+    @State private var showTagPeople = false
     @FocusState private var focusedField: Field?
 
     private enum Field: Hashable {
@@ -44,6 +45,17 @@ struct EditWriteUpView: View {
                             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                             .filter { !$0.isEmpty }
                     }
+
+                VisitDateField(date: $coordinator.visitedOn)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Tagged")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    TagPeopleField(tagged: coordinator.taggedPeople) {
+                        showTagPeople = true
+                    }
+                }
 
                 LabeledField(title: "Address", text: $coordinator.addressInput, placeholder: "Address")
                     .focused($focusedField, equals: .address)
@@ -108,10 +120,15 @@ struct EditWriteUpView: View {
             .padding(.bottom, 40)
         }
         .scrollDismissesKeyboard(.interactively)
-        .background(Color.black)
+        .sheet(isPresented: $showTagPeople) {
+            TagPeoplePicker(initialSelection: coordinator.taggedPeople) { picked in
+                coordinator.taggedPeople = picked
+            }
+        }
+        .background(Color(uiColor: .systemBackground))
         .navigationTitle("Edit")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbarBackground(.black, for: .navigationBar)
+        .toolbarBackground(Color(uiColor: .systemBackground), for: .navigationBar)
         .toolbarBackgroundVisibility(.visible, for: .navigationBar)
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {

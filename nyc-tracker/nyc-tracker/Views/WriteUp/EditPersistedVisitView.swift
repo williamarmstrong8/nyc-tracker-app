@@ -10,6 +10,7 @@ struct EditPersistedVisitView: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var tagsText: String = ""
+    @State private var showTagPeople = false
     @FocusState private var focusedField: Field?
 
     private enum Field: Hashable {
@@ -49,6 +50,20 @@ struct EditPersistedVisitView: View {
                             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                             .filter { !$0.isEmpty }
                     }
+
+                // Bound straight to the model. `saveEdit` on the way out is
+                // what re-queues the row, and the feed re-orders on the next
+                // pull because `visited_at` is what every surface sorts on.
+                VisitDateField(date: $visit.visitedOn, showsHint: false)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Tagged")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    TagPeopleField(tagged: visit.taggedPeopleOrdered.map(\.person)) {
+                        showTagPeople = true
+                    }
+                }
 
                 LabeledField(
                     title: "Address",
@@ -138,10 +153,21 @@ struct EditPersistedVisitView: View {
             .padding(.bottom, 40)
         }
         .scrollDismissesKeyboard(.interactively)
-        .background(Color.black)
+        .sheet(isPresented: $showTagPeople) {
+            TagPeoplePicker(initialSelection: visit.taggedPeopleOrdered.map(\.person)) { picked in
+                // Through the repository, not a bare `context.save()`: changing
+                // who is tagged is an edit the server has not seen, and an
+                // unqueued edit looks right on this device forever while being
+                // absent from every other one.
+                VisitRepository(context: modelContext, userID: visit.ownerUserID)
+                    .setTags(picked, on: visit)
+                sync.requestSync(reason: .newLocalWrite)
+            }
+        }
+        .background(Color(uiColor: .systemBackground))
         .navigationTitle("Edit")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbarBackground(.black, for: .navigationBar)
+        .toolbarBackground(Color(uiColor: .systemBackground), for: .navigationBar)
         .toolbarBackgroundVisibility(.visible, for: .navigationBar)
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
