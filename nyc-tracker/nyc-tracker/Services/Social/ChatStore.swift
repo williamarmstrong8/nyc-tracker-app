@@ -18,6 +18,13 @@ import Supabase
 /// `ChatModels.swift`: a queued-but-unsent message rendered as sent is worse
 /// than no offline support at all.
 ///
+/// Read history is cached, though — to `Caches/`, via `SnapshotStore`. The two
+/// are not in tension: that rule is about messages the user *wrote*, and
+/// everything held here has already been accepted by the server (`send` appends
+/// the row the server returned, never a locally assembled one). So there is no
+/// state a snapshot could misrepresent as sent, and reopening the app shows the
+/// conversation instead of a blank screen with a spinner.
+///
 /// Scoped to the signed-in user by `configure(userID:)`, same as the other
 /// social stores, so one account's threads can never survive into the next.
 @Observable
@@ -36,8 +43,8 @@ final class ChatStore {
     private(set) var messagesByConversation: [UUID: [ChatMessage]] = [:]
 
     private(set) var isLoadingThreads = false
-    /// False until the first successful thread load. Distinguishes "no threads"
-    /// from "haven't looked yet".
+    /// False until there are threads to draw, from the server or from disk.
+    /// Distinguishes "no threads" from "haven't looked yet".
     private(set) var hasLoadedThreads = false
 
     var lastError: PresentableError?
@@ -81,11 +88,10 @@ final class ChatStore {
     func configure(userID: UUID) {
         guard self.userID != userID else { return }
         self.userID = userID
-        // Sample threads need both sides, and the signed-in one is real. This is
-        // the only place the overlay is told who that is; it is a no-op when
-        // demo mode is off.
-        SocialDemoMode.shared.noteSignedInUser(userID)
         clearState()
+        // Previews and open conversations first, network second. The refresh
+        // below overwrites both as soon as it lands.
+        hydrateFromSnapshot(userID: userID)
         refreshThreads()
         startListening()
     }
@@ -133,6 +139,7 @@ final class ChatStore {
             guard !Task.isCancelled else { return }
             threads = loaded
             hasLoadedThreads = true
+            persistThreads()
         } catch {
             guard !Task.isCancelled else { return }
             // Keep what's on screen. A network blip must not empty the friends
@@ -164,6 +171,7 @@ final class ChatStore {
         do {
             let loaded = try await ChatService.messages(in: conversationID)
             messagesByConversation[conversationID] = loaded
+            persistMessages()
             return true
         } catch {
             lastError = SupabaseErrorPresenter.presentable(error, context: .general)
@@ -185,6 +193,7 @@ final class ChatStore {
             guard !older.isEmpty else { return false }
             let existing = messagesByConversation[conversationID] ?? []
             messagesByConversation[conversationID] = merge(older, into: existing)
+            persistMessages()
             return true
         } catch {
             lastError = SupabaseErrorPresenter.presentable(error, context: .general)
@@ -202,19 +211,18 @@ final class ChatStore {
         in conversationID: UUID,
         body: String,
         place placeID: UUID?,
-        visit visitID: UUID?,
-        preview: SharedPlacePreview? = nil
+        visit visitID: UUID?
     ) async -> Bool {
         do {
             let message = try await ChatService.send(
                 conversation: conversationID,
                 body: body,
                 place: placeID,
-                visit: visitID,
-                preview: preview
+                visit: visitID
             )
             let existing = messagesByConversation[conversationID] ?? []
             messagesByConversation[conversationID] = merge([message], into: existing)
+            persistMessages()
             await reloadThreads()
             return true
         } catch {
@@ -233,6 +241,9 @@ final class ChatStore {
         if let index = threads.firstIndex(where: { $0.conversationID == conversationID }),
            threads[index].unreadCount > 0 {
             threads[index].unreadCount = 0
+            // Write through. A snapshot still carrying the old count would relight
+            // the tab badge on the next cold launch for a thread the user has read.
+            persistThreads()
         }
 
         Task {
@@ -263,9 +274,6 @@ final class ChatStore {
     /// `messages` row, without the venue join or the photos, so rendering from
     /// it would show a card that changes shape a moment later.
     private func startListening() {
-        // Sample people have no server rows; a socket for them would sit idle.
-        guard SocialDemoMode.active == nil else { return }
-
         stopListening()
 
         let channel = SupabaseManager.client.channel("direct-messages")
@@ -328,6 +336,68 @@ final class ChatStore {
                 self.markRead(conversationID)
             }
         }
+    }
+
+    // MARK: - Snapshot
+
+    /// Same reasoning as `SocialGraph.snapshotMaxAge`: a floor, not a freshness
+    /// policy. A thread list two weeks old is still the right list of people.
+    private static let snapshotMaxAge: TimeInterval = 14 * 24 * 60 * 60
+
+    /// How much history is worth keeping on disk.
+    ///
+    /// Bounded on both axes because this file is written on every send and read
+    /// synchronously at launch, and neither should grow with how much the user
+    /// talks. Twelve threads is more than fit on the friends screen without
+    /// scrolling, and 60 messages is more than a phone shows in a screenful —
+    /// past either, `loadMessages` and `loadOlderMessages` fetch the rest, which
+    /// is what they already do today for every thread.
+    private static let snapshotConversationLimit = 12
+    private static let snapshotMessageLimit = 60
+
+    private func hydrateFromSnapshot(userID: UUID) {
+        let store = SnapshotStore.shared
+
+        if let cached = store.load(
+            [ConversationThread].self, .chatThreads, userID: userID, maxAge: Self.snapshotMaxAge
+        ) {
+            threads = cached
+            hasLoadedThreads = true
+        }
+
+        if let cached = store.load(
+            [UUID: [ChatMessage]].self, .chatMessages, userID: userID, maxAge: Self.snapshotMaxAge
+        ) {
+            messagesByConversation = cached
+        }
+    }
+
+    private func persistThreads() {
+        guard let userID else { return }
+        SnapshotStore.shared.save(threads, .chatThreads, userID: userID)
+    }
+
+    /// Keep the most recently active threads, and the tail of each.
+    ///
+    /// "Most recently active" is taken from `threads`, not from the message
+    /// dictionary, because that is the order the user will see them in and so the
+    /// order they are likely to reopen. A conversation loaded this session but
+    /// missing from the thread list — which the server should never produce — is
+    /// dropped rather than kept at arbitrary priority.
+    private func persistMessages() {
+        guard let userID else { return }
+
+        let keep = threads
+            .prefix(Self.snapshotConversationLimit)
+            .map(\.conversationID)
+
+        var trimmed: [UUID: [ChatMessage]] = [:]
+        for id in keep {
+            guard let messages = messagesByConversation[id], !messages.isEmpty else { continue }
+            trimmed[id] = Array(messages.suffix(Self.snapshotMessageLimit))
+        }
+
+        SnapshotStore.shared.save(trimmed, .chatMessages, userID: userID)
     }
 
     // MARK: - Merging

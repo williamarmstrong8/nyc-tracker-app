@@ -73,7 +73,7 @@ struct PlaceDetailSheet: View {
                 .padding(.horizontal, 1)
                 .padding(.vertical, 16)
             }
-            .background(Color(uiColor: .systemBackground))
+            .flatModalContentBackground()
             .navigationTitle(group.name)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -81,8 +81,10 @@ struct PlaceDetailSheet: View {
                     Button("Done") { dismiss() }
                 }
             }
+            .flatModalToolbarBackground()
         }
         .presentationDragIndicator(.visible)
+        .flatModalBackground()
     }
 
     // MARK: - Header
@@ -243,8 +245,8 @@ struct PlaceDetailSheet: View {
                 Text(visit.visitedOn.formatted(date: .abbreviated, time: .omitted))
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
-                if !visit.enrichedDescription.isEmpty {
-                    Text(visit.enrichedDescription)
+                if !visit.note.isEmpty {
+                    Text(visit.note)
                         .font(.caption)
                         .foregroundStyle(.tertiary)
                         .lineLimit(2)

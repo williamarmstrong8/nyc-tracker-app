@@ -7,7 +7,8 @@ A private, single-user native iOS app for logging restaurants and bars visited i
 - Native SwiftUI, Xcode 26, iOS 26+ (deployment target `IPHONEOS_DEPLOYMENT_TARGET = 26.5`).
 - Targets Apple-Intelligence-capable devices; simulator + non-AI devices supported via fallbacks.
 - **Local-only for now**: SwiftData for rows, local files (Application Support) for photos + audio.
-- All AI runs on-device (FoundationModels for enrichment, Speech framework for transcription).
+- No generative AI. The Speech framework transcribes voice notes on device; nothing rewrites,
+  summarises, or tags on the user's behalf.
 - A remote sync layer (Supabase) will be added in a later prompt. There is no networking today.
 - A separate website will read *published* entries once sync exists. It's not part of this app.
 
@@ -17,11 +18,16 @@ Defined in `nyc-tracker/Models/Models.swift`.
 
 - `Place` (class): `id`, `name`, `category`, `neighborhood`, `lat`, `lng`, `externalPOIId?`,
   `visits [Visit]` (cascade). `category` is a computed accessor over `categoryRaw`.
-- `Visit` (class): `id`, `visitedOn`, `title`, `tags [String]`, `enrichedDescription`,
-  `transcript` (verbatim — never overwritten by enrichment), `topQuote`, `rating?`,
-  `returnIntent?`, `address?`, `nameOverride?`, `locationSource`, `published`, `createdAt`,
-  `audioRelativePath?`, `rawPlaceGuess?`, `kind (visited | wantToTry)`, `place (Place?)`,
-  `photos [Photo]` (cascade).
+- `Visit` (class): `id`, `visitedOn`, `title`, `tags [String]`, `note`, `rating?`, `address?`,
+ `nameOverride?`, `locationSource`, `published`, `createdAt`, `hadVoiceNote`, `rawPlaceGuess?`,
+ `kind (visited | wantToTry)`, `place (Place?)`, `photos [Photo]` (cascade).
+
+ **An entry is: date, location, description, photos, tags, verdict.** There is no separate
+ transcript / summary / pull quote any more — those three fields existed because an on-device
+ model rewrote the user's words, and with the model gone they were the same sentence stored
+ three times. `note` is the survivor and keeps the old column
+ (`@Attribute(originalName: "enrichedDescription")`) so existing rows migrate in place. It is
+ written directly by the user, typed or dictated, and never processed.
 - `Photo` (class): `id`, `relativePath?` (on-disk file), `assetLocalIdentifier?` (PHAsset id),
   `order`, `sfSymbol?` (deprecated seed placeholder), `visit (Visit?)`.
 - `VisitTag` (class): one tagged person — `userID`, `username?`, `displayName?`, `avatarURL?`,
@@ -30,8 +36,21 @@ Defined in `nyc-tracker/Models/Models.swift`.
   friendship ends. Reach it through `Visit.taggedPeopleOrdered` — SwiftData relationships are
   unordered sets.
 
-Enums (`PlaceCategory`, `Rating`, `ReturnIntent`, `LocationSource`) are stored as raw strings on the
-model and exposed via computed properties.
+Enums (`PlaceCategory`, `Rating`, `LocationSource`) are stored as raw strings on the model and
+exposed via computed properties.
+
+`Rating` is two cases — `liked` and `notLiked` — presented as two cards side by side
+(`Views/Shared/RatingField.swift`), and tapping the selected one clears it. It replaces the old
+four-point scale *and* the separate `ReturnIntent` question. `notLiked` keeps `"no"` as its raw
+value because `visits.rating_label` still carries the CHECK constraint listing the four old labels,
+and `Visit.rating` reads through `Rating.from(loose:)` so a row stored as `loved` still resolves.
+
+`VenueTag` (`Models/VenueTag.swift`) is the tag vocabulary, and it is eight cases:
+amazing ambience, amazing food, amazing drinks, fast-ish food, great coffee, good healthy,
+delish dessert, date night. Raw values are kebab-case and are what land in `Visit.tags` and
+`visits.tags`; labels are display-only, so rewording one never orphans the entries tagged with it.
+`VenueTag.label(forRawValue:)` renders anything stored under the old ~50-case vocabulary rather
+than dropping it, and `TagChipRow` goes through it so no surface prints a raw value.
 
 ## Design language — Apple Liquid Glass (iOS 26)
 
@@ -96,23 +115,30 @@ model and exposed via computed properties.
    reason `MapHome.MapSheet` exists — two `.sheet(isPresented:)` on one view is where the second
    can silently win.
 4. **Capture flow** (for a real visit):
-   1. **Details** screen: photo strip, date, tag-people row, hold-to-record voice memo (real mic
-      + on-device transcription), optional Name/Address/Tags.
-   2. **Submit** → **Enriching…** overlay while `LocationResolver` runs (name-first when a Name is
-      given, photo-GPS-first otherwise) and `FoundationModelsEnricher` produces the write-up.
+   1. **Details** screen: photo strip, tag-people row, location search, description (typed or
+      dictated via hold-to-record), **tags**, **verdict**, date. Everything except the location
+      is collected here — nothing about the entry is produced after submit.
+   2. **Submit** → **Finding place…** overlay while `LocationResolver` runs (name-first when a
+      name is given, photo-GPS-first otherwise). That is all this stage does now.
    3. If MapKit returned no confident match, a **Venue picker** sheet appears with the top 3,
       plus three escape hatches: search manually (`ManualVenueEntryView`), **drop a pin**
       (`DropPinView`), or "keep my name". Otherwise, straight to write-up.
-   4. **Write-up**: image carousel → title → tag chips → enriched body → pull quote → collapsible
-      transcript. Edit round-trips into `EditWriteUpView`.
+   4. **Write-up**: image carousel → title → tag chips → description → verdict. Edit round-trips
+      into `EditWriteUpView`.
    5. **Confirm** persists `Place + Visit + Photos` via `VisitRepository` and returns to the map.
 
-5. **Filter button** on the Home toggle strip. `EntryFilter` (an `@Observable` in
+5. **Tags and verdict.** `VenueTagField` and `RatingField` (both `Views/Shared/`) are the two
+   sections that appear on every entry surface: the capture Details screen, `WantToTryView`, and
+   both edit screens. `VenueTagField` puts all eight tags on screen at once — the vocabulary was
+   shrunk precisely so a menu isn't needed. `RatingField` is absent from `WantToTryView` and from
+   the edit form whenever `kind == .wantToTry`: nobody has been yet, so there is nothing to judge.
+
+6. **Filter button** on the Home toggle strip. `EntryFilter` (an `@Observable` in
    `Stores/EntryFilter.swift`) filters both Map and List by kind (visited / want-to-try),
    category (restaurant / bar / cafe / bakery / other), and any subset of `VenueTag` tags. The
    badge next to the filter icon shows how many filters are active.
 
-6. **Tagging people.** A visit can name the friends who were there. `TagPeopleField` +
+7. **Tagging people.** A visit can name the friends who were there. `TagPeopleField` +
    `TagPeoplePicker` (both in `Views/Shared/`) appear on the capture Details screen and on both
    edit screens; `TaggedPeopleRow` renders the result ("with Maya and Dev") on the feed card and
    every write-up. **Friends only, and that is a server rule** — the insert policy on `visit_tags`
@@ -120,12 +146,12 @@ model and exposed via computed properties.
    would mostly 403 on save. The tagged person can untag themselves (`VisitTagService.untagSelf`,
    permitted by the delete policy); no UI hangs off that yet.
 
-7. **Profile tabs.** `ProfileTabPicker` puts an Activity | Tagged toggle above the photo grid on
+8. **Profile tabs.** `ProfileTabPicker` puts an Activity | Tagged toggle above the photo grid on
    both the signed-in profile and a friend's. Activity is that person's own entries; Tagged is
    `tagged_visits(p_user)` — entries *other people* wrote naming them, so those cells carry the
    author's avatar and open the friend write-up sheet, which has no edit or delete path.
 
-8. **Dates.** `VisitDateField` (`Views/Shared/`) sets `Visit.visitedOn` on the capture Details
+9. **Dates.** `VisitDateField` (`Views/Shared/`) sets `Visit.visitedOn` on the capture Details
    screen and on both edit screens. It is optional in the only sense that matters: it is seeded to
    now, so logging a place the day you went needs no input, and leaving it alone means the entry
    sorts by when it was uploaded. Only the *day* is editable —
@@ -135,31 +161,41 @@ model and exposed via computed properties.
    `createdAt` as a secondary descriptor so a same-instant tie still resolves to upload order.
    Future dates are rejected by the picker's range — an entry ahead of now is a want-to-try.
 
-9. **Read-only write-up** (opened from a map pin or list row) has an `ellipsis.circle` menu with:
-   Edit (opens `EditPersistedVisitView` bound directly to the SwiftData row), Move to want-to-try /
-   Mark as visited, and Delete (with confirmation dialog). Delete also cleans up on-disk audio +
-   photo files.
+10. **Read-only write-up** (opened from a map pin or list row) has an `ellipsis.circle` menu with:
+    Edit (opens `EditPersistedVisitView` bound directly to the SwiftData row), Move to want-to-try /
+    Mark as visited, and Delete (with confirmation dialog). Delete also cleans up on-disk photo
+    files.
+
+11. **Edit modals.** Both of them — `EditWriteUpView` (the in-flight capture draft) and
+    `EditPersistedVisitView` (a saved row) — are toolbars around one shared
+    `VisitEditForm` (`Views/WriteUp/`), so the two screens cannot drift apart the way they had.
+    They use the same flat-modal chrome as the write-up sheets they open from
+    (`.flatModalBackground()` / `.flatModalToolbarBackground()` / `.flatModalContentBackground()`)
+    rather than `.systemBackground`, which iOS elevates a shade lighter for modals and which read
+    as gray on top of a black write-up. Cancel means Cancel in both: the persisted editor calls
+    `modelContext.rollback()`, and the draft editor restores a snapshot taken on appear.
 
 ## Folder structure
 
 ```
 nyc-tracker/
-  Models/            Models.swift (@Model Place/Visit/Photo, enums)
-  Stores/            LocalStore (ModelContainer + first-launch seed), VisitRepository
+  Models/            Models.swift (@Model Place/Visit/Photo/VisitTag, enums), VenueTag
+  Stores/            LocalStore (ModelContainer), VisitRepository, EntryFilter
   Services/
     FileStorage       Local Application Support directory for photos + audio
     LocationProvider  One-shot device location fetch (CLLocationManager)
     LocationResolver  Photo GPS clustering, geocoding, MKLocalSearch venue candidates
     Recorder          RecorderProtocol + SpeechRecorder (real) + StubRecorder (previews)
-    Enricher          EnricherProtocol + FoundationModelsEnricher (real, w/ fallback) + StubEnricher
   Views/
     Home/            HomeView, MapHome (@Query), ListHome (@Query), HomeModeToggle
     Nav/             BottomNavBar
-    Capture/         CaptureCoordinator, CaptureFlowView (picker/details/processing/venuePicker/writeUp),
-                     DetailsView, HoldToRecordButton
-    WriteUp/         WriteUpView, ReadOnlyWriteUpView, EditWriteUpView, PhotoCarousel, PullQuote
+    Capture/         CaptureCoordinator, CaptureFlowView (details/processing/venuePicker/writeUp),
+                     DetailsView, WantToTryView, HoldToRecordButton
+    WriteUp/         WriteUpView, ReadOnlyWriteUpView, FriendVisitWriteUpView, VisitEditForm,
+                     EditWriteUpView, EditPersistedVisitView, PhotoCarousel
     Profile/         ProfileView
-    Shared/          Haptics, PhotoView (SF Symbol / picker item / disk / PHAsset), TagChip
+    Shared/          Haptics, PhotoView (SF Symbol / picker item / disk / PHAsset), TagChip,
+                     VenueTagField, RatingField, VisitDateField, LabeledField, FlatModalBackground
 ```
 
 ## What's real, what still falls back
@@ -177,13 +213,13 @@ nyc-tracker/
   the venue picker sheet is shown. The chosen `MKMapItem.Identifier` is stored as `externalPOIId`.
 - **Voice recording + transcription** — `SpeechRecorder` writes an M4A into
   Application Support/Audio, transcribes it with `SpeechAnalyzer` + `SpeechTranscriber`
-  (installing model assets on demand via `AssetInventory`), and writes the transcript to
-  `Visit.transcript` verbatim. Never overwritten by the enricher.
-- **AI enrichment** — `FoundationModelsEnricher` guards on `SystemLanguageModel.default.availability`
-  and calls `LanguageModelSession.respond(to:generating: VisitEnrichment.self)`. `VisitEnrichment`
-  is a `@Generable` struct with `@Guide`d fields for title / description / tags / topQuote / dish /
-  companions / suggestedRating. User tags are merged with model tags. `prewarm()` is called on
-  Details appear.
+  (installing model assets on demand via `AssetInventory`), and drops the text straight into the
+  description field. The audio file is deleted as soon as transcription finishes.
+- **No AI enrichment.** `Services/Enricher.swift` (`EnricherProtocol`, `LocalEnricher`,
+  `TranscriptCleaner`, and before that `FoundationModelsEnricher`) is gone. Nothing rewrites the
+  user's words, picks tags for them, or suggests a rating — dictation is transcription and nothing
+  more. If a write-up assistant ever comes back it needs its own field, not a second copy of
+  `note`: the last one cost three columns and two screens' worth of UI to unwind.
 
 ### Graceful fallbacks
 
@@ -192,13 +228,12 @@ nyc-tracker/
 - **No nearby venue found**: user's typed Name stays as the title, no `externalPOIId`.
 - **SpeechAnalyzer unavailable** (simulator / older device / no models yet): `SpeechRecorder`
   falls back to `SFSpeechRecognizer` with `requiresOnDeviceRecognition = true`; if that's also
-  unavailable, transcript is left empty and the flow continues.
-- **FoundationModels unavailable** (simulator / Apple Intelligence off / model downloading):
-  `FoundationModelsEnricher` delegates to `StubEnricher` (deterministic mock output).
+  unavailable, the description is left empty and the flow continues — it is an ordinary text
+  field, so the user can just type.
 - **Photo library denied**: `LocationResolver.coordinatesFromAssets` returns nil, and the flow
   continues with the next fallback. `PhotoView` still displays picker-item and file-URL sources.
 - **Mic / speech denied**: the recording call fails silently and the flow continues with an empty
-  transcript.
+  description.
 
 ## Stubs / TODOs left for the next prompt (remote sync)
 
@@ -206,11 +241,11 @@ nyc-tracker/
 - `Stores/LocalStore.swift` — `VisitRepository` is the seam. To add Supabase later, wrap this
   repository (or add a second implementation) that mirrors inserts/updates to Supabase Postgres,
   uploads photos + audio to Supabase Storage, and drives the `published` flag.
-- `Services/Enricher.swift` — output includes `dish`, `companions`, `suggestedRating` fields that
-  aren't yet surfaced in Edit UI beyond pre-filling `Visit.rating`. Wire into Edit if desired.
 - `Views/Profile/ProfileView.swift` — still a placeholder with a disabled "Sign in" button. Wire
   Supabase Auth here.
-- Publishing / rating / return-intent are captured on the Visit but not yet synced.
+- `visits.transcript`, `visits.top_quote` and `visits.return_intent` are dead columns upstream.
+  The app no longer reads them, and `VisitUpsert` writes explicit NULLs so a re-upload clears
+  whatever an older build left there. Dropping the columns is a migration nobody needs yet.
 - `visit_tags` has no notification: being tagged is only discoverable by opening your own profile.
   A push or an inbox row is the obvious next step and needs no schema change.
 - Nothing lets a tagged person remove their own tag from the UI. `VisitTagService.untagSelf` and

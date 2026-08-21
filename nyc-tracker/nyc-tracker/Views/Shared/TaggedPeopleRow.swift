@@ -12,6 +12,7 @@ struct TaggedPeopleRow: View {
     /// How many avatars to draw before collapsing the rest into "+N". Names are
     /// summarised separately — see `label`.
     var maxAvatars: Int = 3
+    var avatarSize: CGFloat = 30
     var font: Font = .subheadline
     /// The signed-in user, when known. Their name is replaced with "you", which
     /// is how a person refers to themselves in a sentence about themselves.
@@ -28,8 +29,8 @@ struct TaggedPeopleRow: View {
             HStack(spacing: 8) {
                 avatarStack
                 label
-                Spacer(minLength: 0)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .accessibilityElement(children: .combine)
             .accessibilityLabel(accessibilityLabel)
         }
@@ -38,55 +39,72 @@ struct TaggedPeopleRow: View {
     // MARK: - Avatars
 
     /// Overlapped by a third of their width, drawn first-on-top via `zIndex` so
-    /// the stack reads left to right the same way the names do.
+    /// the stack reads left to right the same way the names do. The ring is the
+    /// page background rather than a light or dark constant, so the overlap
+    /// reads as a gap between faces in both appearances.
     private var avatarStack: some View {
-        HStack(spacing: -Self.avatarSize / 3) {
+        HStack(spacing: -avatarSize / 3) {
             ForEach(Array(shown.enumerated()), id: \.element.id) { index, person in
-                PersonAvatar(person: person, size: Self.avatarSize)
-                    .overlay {
-                        Circle().strokeBorder(Color(uiColor: .systemBackground), lineWidth: 1.5)
-                    }
+                PersonAvatar(person: person, size: avatarSize)
+                    .overlay { ring }
                     .zIndex(Double(shown.count - index))
             }
 
             if overflow > 0 {
                 Text("+\(overflow)")
-                    .font(.system(size: 10, weight: .bold))
+                    .font(.system(size: avatarSize * 0.36, weight: .bold))
                     .foregroundStyle(.secondary)
-                    .frame(width: Self.avatarSize, height: Self.avatarSize)
+                    .frame(width: avatarSize, height: avatarSize)
                     .background(Circle().fill(Color(uiColor: .secondarySystemFill)))
-                    .overlay {
-                        Circle().strokeBorder(Color(uiColor: .systemBackground), lineWidth: 1.5)
-                    }
+                    .overlay { ring }
             }
         }
     }
 
-    private static let avatarSize: CGFloat = 22
+    private var ring: some View {
+        Circle().strokeBorder(Color(uiColor: .systemBackground), lineWidth: 2)
+    }
 
     // MARK: - Names
+
+    /// Names come after the whole avatar stack, and as many are spelled out as
+    /// the row is wide enough to hold: `ViewThatFits` walks from every name down
+    /// to one name plus "+3 others", and settles on the last candidate when even
+    /// that overflows. Measuring beats a fixed cut — the same two names fit on a
+    /// write-up and not on a feed card sitting next to a save button.
+    @ViewBuilder
+    private var label: some View {
+        ViewThatFits(in: .horizontal) {
+            names(spellingOut: people.count)
+            names(spellingOut: 3)
+            names(spellingOut: 2)
+            names(spellingOut: 1)
+        }
+    }
 
     /// Names are tappable individually, which is why this is a run of views and
     /// not one interpolated `Text`: "with Maya and Dev" has two destinations in
     /// it, and a single string can only have one.
-    @ViewBuilder
-    private var label: some View {
-        HStack(spacing: 0) {
+    private func names(spellingOut limit: Int) -> some View {
+        let spelled = Array(people.prefix(max(1, min(limit, people.count))))
+        let rest = people.count - spelled.count
+
+        return HStack(spacing: 0) {
             Text("with ")
                 .font(font)
                 .foregroundStyle(.secondary)
 
-            ForEach(Array(named.enumerated()), id: \.offset) { index, person in
+            ForEach(Array(spelled.enumerated()), id: \.element.id) { index, person in
                 nameText(person)
-                if let separator = separator(at: index) {
+                if let separator = separator(at: index, of: spelled.count, rest: rest) {
                     Text(separator)
                         .font(font)
                         .foregroundStyle(.secondary)
                 }
             }
 
-            if overflowNames > 0 {
-                Text(" and \(overflowNames) more")
+            if rest > 0 {
+                Text(" +\(rest) \(rest == 1 ? "other" : "others")")
                     .font(font)
                     .foregroundStyle(.secondary)
             }
@@ -108,17 +126,12 @@ struct TaggedPeopleRow: View {
         }
     }
 
-    /// Two names spelled out, then a count. Three or more full names in a row
-    /// wraps on a narrow phone and pushes the card's title down a line, which is
-    /// worse than "and 2 more".
-    private var named: [PersonSummary] { Array(people.prefix(2)) }
-    private var overflowNames: Int { max(0, people.count - named.count) }
-
-    private func separator(at index: Int) -> String? {
-        // Only ever between two names, and only when nothing is being counted
-        // after them — "Maya, Dev and 2 more" would double up on conjunctions.
-        guard named.count == 2, index == 0 else { return nil }
-        return overflowNames > 0 ? ", " : " and "
+    private func separator(at index: Int, of total: Int, rest: Int) -> String? {
+        guard index < total - 1 else { return nil }
+        // "Maya, Dev +2 others" — a conjunction before a name that isn't the
+        // last one reads as if the list ended there.
+        if rest == 0, index == total - 2 { return " and " }
+        return ", "
     }
 
     private func name(for person: PersonSummary) -> String {

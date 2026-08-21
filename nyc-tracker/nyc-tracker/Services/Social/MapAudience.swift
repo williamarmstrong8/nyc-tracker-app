@@ -155,7 +155,7 @@ final class MapAudienceStore {
 ///
 /// `MKCoordinateRegion` is center+span and needs converting at every call site;
 /// this converts once and is comparable, which is what the coverage check needs.
-struct GeoBounds: Equatable, Sendable {
+struct GeoBounds: Codable, Equatable, Sendable {
     var minLat: Double
     var maxLat: Double
     var minLng: Double

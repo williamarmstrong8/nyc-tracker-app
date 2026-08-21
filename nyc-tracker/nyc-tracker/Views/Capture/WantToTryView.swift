@@ -2,32 +2,53 @@ import SwiftUI
 import SwiftData
 import PhotosUI
 import CoreLocation
+import UIKit
 
-/// "Add a place to try" sheet. Uses a scrolling VStack (not a Form) so tapping into a field
-/// doesn't shuffle the layout. Photos + a short voice memo are both optional — when present, they
-/// feed the same LocationResolver + FoundationModelsEnricher pipeline the real capture flow uses.
+/// "Add a place to try" sheet — the same shape as the capture flow's `DetailsView`
+/// (photos, location search, description, tags), minus what doesn't make sense
+/// for a place nobody has been to yet: a verdict (`RatingField`), a visited
+/// date (`VisitDateField`), and who was there (`TagPeopleField`) — nobody's
+/// been, so there's no one to tag. Uses a scrolling VStack (not a Form) so
+/// tapping into a field doesn't shuffle the layout.
 ///
-/// If the user adds photos without typing a name, Vision-based OCR extracts a likely venue name
-/// from the biggest, most confident piece of text in the frame (typically storefront signage).
+/// Unlike the real capture flow — where photos are picked before this screen is
+/// ever reached — photos here are entirely optional: `LocationSearchField`
+/// lets the user name the place directly, and Vision-based OCR silently reads
+/// a likely venue name off any added photo (the biggest, most confident piece
+/// of text in the frame, typically storefront signage) as a fallback so
+/// `LocationResolver` still has something to search by if the user adds a
+/// photo without searching. If both come up empty the place is saved as
+/// "New Spot" and can be renamed later.
+///
+/// No verdict here. A want-to-try is a place nobody has been to yet, so "liked
+/// it" has nothing to describe; it appears the moment the entry is marked as
+/// visited. No date either — a want-to-try has no "when".
 struct WantToTryView: View {
     let userID: UUID
+    /// Set when the entry started from a place already tapped on the map (or
+    /// found via search) — seeds the name/address fields and `selectedVenue`
+    /// with an already-confirmed venue instead of starting empty.
+    let preselectedVenue: VenueCandidate?
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
     @Environment(SyncEngine.self) private var sync
 
-    @State private var name: String = ""
-    @State private var address: String = ""
-    @State private var tags: String = ""
+    @State private var name: String
+    @State private var address: String
+    /// The confirmed venue behind `name`/`address`, whether it arrived as
+    /// `preselectedVenue` or was picked from `LocationSearchField` below.
+    /// Non-nil skips `LocationResolver` entirely at save time — same shortcut
+    /// the capture flow's Details screen uses.
+    @State private var selectedVenue: VenueCandidate?
+
     @State private var photoItems: [PhotosPickerItem] = []
     @State private var showPhotosPicker: Bool = false
-    @State private var transcript: String = ""
+    @State private var note: String = ""
     @State private var hadVoiceNote: Bool = false
-
-    /// Set when we auto-populated `name` from OCR — used to show the little "detected" hint and to
-    /// clear the flag if the user starts editing.
-    @State private var nameWasAutoDetected: Bool = false
-    @State private var isDetectingName: Bool = false
+    /// Raw `VenueTag` values. Worth asking for even on a place nobody has been
+    /// to — "date night" and "great coffee" are exactly why it's on the list.
+    @State private var tags: [String] = []
 
     @State private var recorder: any RecorderProtocol = SpeechRecorder()
 
@@ -35,12 +56,17 @@ struct WantToTryView: View {
     @State private var isResolving: Bool = false
     @State private var showPicker: Bool = false
     @State private var pendingResolution: LocationResolution?
-    @State private var pendingEnrichment: EnricherOutput?
 
     @FocusState private var focused: Field?
-    enum Field { case name, address, tags }
+    enum Field { case description }
 
-    private let enricher: EnricherProtocol = FoundationModelsEnricher()
+    init(userID: UUID, preselectedVenue: VenueCandidate? = nil) {
+        self.userID = userID
+        self.preselectedVenue = preselectedVenue
+        _name = State(initialValue: preselectedVenue?.name ?? "")
+        _address = State(initialValue: preselectedVenue?.address ?? "")
+        _selectedVenue = State(initialValue: preselectedVenue)
+    }
 
     private var canSave: Bool {
         !isResolving && (!name.trimmingCharacters(in: .whitespaces).isEmpty || !photoItems.isEmpty)
@@ -58,13 +84,18 @@ struct WantToTryView: View {
 
                     photoRow
 
-                    voiceMemoSection
+                    descriptionSection
 
-                    fieldsSection
+                    LocationSearchField(
+                        nameInput: $name,
+                        addressInput: $address,
+                        selectedVenue: $selectedVenue
+                    )
+                    .zIndex(10)
+
+                    VenueTagField(selection: $tags)
 
                     saveButton
-
-                    Spacer(minLength: 40)
                 }
                 .padding(.horizontal, 20)
                 .padding(.top, 12)
@@ -76,7 +107,12 @@ struct WantToTryView: View {
                     Button("Cancel") { dismiss() }
                 }
                 ToolbarItem(placement: .keyboard) {
-                    Button("Done") { focused = nil }
+                    Button("Done") {
+                        focused = nil
+                        // LocationSearchField owns its own FocusState, so this
+                        // is the only way "Done" can also dismiss its keyboard.
+                        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                    }
                 }
             }
             .photosPicker(
@@ -87,15 +123,9 @@ struct WantToTryView: View {
                 photoLibrary: .shared()
             )
             .onChange(of: photoItems) { _, newItems in
-                // If the user hasn't typed a name yet, try to read it off the photo(s).
+                // No name yet (no preselected/searched venue) — try to read one off the photo(s), silently.
                 if name.trimmingCharacters(in: .whitespaces).isEmpty, !newItems.isEmpty {
                     Task { await detectNameFromPhotos(newItems) }
-                }
-            }
-            .onChange(of: name) { _, newValue in
-                // As soon as the user starts editing, stop calling the value "detected".
-                if nameWasAutoDetected, !newValue.isEmpty {
-                    nameWasAutoDetected = false
                 }
             }
             .sheet(isPresented: $showPicker) {
@@ -117,9 +147,6 @@ struct WantToTryView: View {
                     }
                 }
             }
-            .task {
-                await enricher.prewarm()
-            }
         }
     }
 
@@ -129,22 +156,19 @@ struct WantToTryView: View {
         VStack(alignment: .leading, spacing: 4) {
             Text("Save a place you want to try")
                 .font(.title3.weight(.semibold))
-            Text("Just a photo works — we'll read the name off the sign and pin it on the map.")
+            Text("Search for it, or just add a photo — we'll read the name off the sign and pin it on the map.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
         }
     }
 
     private var photoStrip: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 10) {
-                ForEach(photoItems, id: \.itemIdentifier) { item in
-                    PhotoView(source: .pickerItem(item), contentMode: .fill)
-                        .frame(width: 120, height: 160)
-                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                }
-            }
-        }
+        ReorderablePhotoStrip(
+            items: $photoItems,
+            thumbnailWidth: 120,
+            thumbnailHeight: 160,
+            cornerRadius: 14
+        )
     }
 
     private var photoRow: some View {
@@ -166,53 +190,25 @@ struct WantToTryView: View {
         .buttonStyle(.glass)
     }
 
-    private var voiceMemoSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Voice note (optional)")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-            HoldToRecordButton(recorder: recorder, hasRecording: !transcript.isEmpty) { result in
-                transcript = result.transcript
+    /// Type it, dictate it, or both — recording fills the same box a typed note would, and either
+    /// one is free to edit afterward. The record button sits centered underneath, its own control
+    /// rather than something the text field expects to share space with.
+    private var descriptionSection: some View {
+        VStack(spacing: 12) {
+            LabeledField(
+                title: "Description (optional)",
+                text: $note,
+                placeholder: "What do you want to remember about this place?",
+                axis: .vertical,
+                lineLimit: 3...8
+            )
+            .focused($focused, equals: .description)
+
+            HoldToRecordButton(recorder: recorder, hasRecording: hadVoiceNote) { result in
+                note = result.transcript
                 hadVoiceNote = result.hadRecording
             }
-            .frame(maxWidth: .infinity, alignment: transcript.isEmpty ? .leading : .center)
-            if !transcript.isEmpty {
-                Text(transcript)
-                    .font(.subheadline)
-                    .foregroundStyle(.primary)
-                    .padding(12)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .fill(Color(uiColor: .secondarySystemBackground))
-                    )
-            }
-        }
-    }
-
-    private var fieldsSection: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            VStack(alignment: .leading, spacing: 4) {
-                LabeledField(title: "Name", text: $name, placeholder: "e.g. Katz's Deli")
-                    .focused($focused, equals: .name)
-                if isDetectingName {
-                    HStack(spacing: 6) {
-                        ProgressView().controlSize(.mini)
-                        Text("Reading name from photo…")
-                    }
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                } else if nameWasAutoDetected, !name.isEmpty {
-                    Label("Detected from photo — tap to correct", systemImage: "sparkles")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            LabeledField(title: "Address (optional)", text: $address, placeholder: "e.g. 205 E Houston St")
-                .focused($focused, equals: .address)
-            LabeledField(title: "Tags (optional, comma separated)", text: $tags, placeholder: "pastrami, iconic")
-                .focused($focused, equals: .tags)
+            .frame(maxWidth: .infinity, alignment: .center)
         }
     }
 
@@ -236,11 +232,9 @@ struct WantToTryView: View {
     // MARK: - OCR
 
     /// Load photo data and ask Vision for the most sign-like text across the batch. Only runs when
-    /// the name field is still empty at completion time.
+    /// `name` is still empty at completion time, and there's no UI feedback for it — it's a
+    /// silent assist for `LocationResolver`, not something the user is asked to confirm here.
     private func detectNameFromPhotos(_ items: [PhotosPickerItem]) async {
-        isDetectingName = true
-        defer { isDetectingName = false }
-
         var datas: [Data] = []
         for item in items.prefix(3) {  // OCR up to first 3 photos to keep it snappy
             if let data = try? await item.loadTransferable(type: Data.self) {
@@ -250,10 +244,9 @@ struct WantToTryView: View {
         guard !datas.isEmpty else { return }
         guard let detected = await TextRecognizer.recognizePlaceName(fromBatch: datas) else { return }
 
-        // Only apply if the user hasn't started typing since we began.
+        // Only apply if nothing else has filled it in since we began.
         guard name.trimmingCharacters(in: .whitespaces).isEmpty else { return }
         name = detected.titleCasedForVenue
-        nameWasAutoDetected = true
     }
 
     // MARK: - Save
@@ -262,6 +255,11 @@ struct WantToTryView: View {
         focused = nil
         isResolving = true
         defer { isResolving = false }
+
+        if let selectedVenue {
+            await save(confirmedVenue: selectedVenue)
+            return
+        }
 
         // If we still don't have a name and we do have photos, run OCR one more time synchronously.
         if name.trimmingCharacters(in: .whitespaces).isEmpty, !photoItems.isEmpty {
@@ -281,19 +279,6 @@ struct WantToTryView: View {
         candidates = resolution.candidates
         pendingResolution = resolution
 
-        // If the user gave a voice memo, ask the on-device model to summarize it into tags/description.
-        if !transcript.isEmpty {
-            let input = EnricherInput(
-                nameHint: nameHint.isEmpty ? nil : nameHint,
-                addressHint: resolution.address ?? (address.isEmpty ? nil : address),
-                venueName: resolution.confidentPick?.name,
-                venueCategory: resolution.confidentPick?.category,
-                tagHints: parsedTags(),
-                transcript: transcript
-            )
-            pendingEnrichment = try? await enricher.enrich(input)
-        }
-
         if let confident = resolution.confidentPick {
             persist(candidate: confident)
             Haptics.success()
@@ -304,10 +289,38 @@ struct WantToTryView: View {
             // too. That case used to save silently at the device's coordinate,
             // which is the wrong answer for the exact places MapKit cannot find:
             // a truck or a stall, pinned wherever the phone happened to be. The
-            // picker's own empty state offers manual search and drop-a-pin, and
-            // "keep my name" still lands on the old behaviour.
+            // picker's own empty state offers manual search and "write my own
+            // name" (which pins it by hand).
             showPicker = true
         }
+    }
+
+    /// The venue is already confirmed — either handed in as `preselectedVenue` or picked from the
+    /// search field — so there's nothing left to resolve. Only a neighbourhood label is missing
+    /// (MapKit search results don't carry one), and the optional photos/note still feed the same
+    /// local write-up path as the freeform save.
+    private func save(confirmedVenue venue: VenueCandidate) async {
+        // Already on the list — don't drop a second pin on the same spot.
+        if VisitRepository(context: modelContext, userID: userID).existingWantToTry(matching: venue) != nil {
+            Haptics.success()
+            dismiss()
+            return
+        }
+
+        let described = await LocationResolver.describe(coordinate: venue.coordinate)
+        let resolvedAddress = venue.address ?? described.address
+        pendingResolution = LocationResolution(
+            coordinate: venue.coordinate,
+            source: .manual,
+            neighborhood: described.neighborhood,
+            address: resolvedAddress,
+            candidates: [venue],
+            confidentPick: venue
+        )
+
+        persist(candidate: venue)
+        Haptics.success()
+        dismiss()
     }
 
     private func persist(candidate: VenueCandidate?, coordinate override: CLLocationCoordinate2D? = nil) {
@@ -320,10 +333,6 @@ struct WantToTryView: View {
         let venueName = candidate?.name ?? (typedName.isEmpty ? "New Spot" : typedName)
         let category = candidate?.category ?? .other
         let neighborhood = pendingResolution?.neighborhood ?? "NYC"
-
-        let userTags = parsedTags()
-        let modelTags = pendingEnrichment?.tags ?? []
-        let mergedTags = (modelTags + userTags).uniqued()
 
         Task { @MainActor in
             let photoRows = await writePhotosToDisk()
@@ -339,10 +348,8 @@ struct WantToTryView: View {
 
             let visit = Visit(
                 title: venueName,
-                tags: mergedTags,
-                enrichedDescription: pendingEnrichment?.enrichedDescription ?? "",
-                transcript: transcript,
-                topQuote: pendingEnrichment?.topQuote ?? "",
+                tags: tags,
+                note: note,
                 address: candidate?.address ?? pendingResolution?.address ?? (address.isEmpty ? nil : address),
                 nameOverride: typedName.isEmpty ? nil : typedName,
                 locationSource: pendingResolution?.source ?? .manual,
@@ -359,23 +366,9 @@ struct WantToTryView: View {
     private func writePhotosToDisk() async -> [Photo] {
         await PhotoIngest.rows(from: photoItems)
     }
-
-    private func parsedTags() -> [String] {
-        tags
-            .split(separator: ",")
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-    }
 }
 
 // MARK: - Helpers
-
-private extension Array where Element: Hashable {
-    func uniqued() -> [Element] {
-        var seen = Set<Element>()
-        return filter { seen.insert($0).inserted }
-    }
-}
 
 private extension String {
     /// Signage is usually ALL CAPS. Convert to title case for a friendlier read, but keep small

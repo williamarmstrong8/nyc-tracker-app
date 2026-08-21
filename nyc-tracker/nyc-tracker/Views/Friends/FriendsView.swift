@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// The friends page: your accepted friends, alphabetical and searchable.
-/// Add friends (search + requests) is a sheet, not a card on this list.
+/// Add friends (search + requests) is a full-screen cover, not a card on this list.
 ///
 /// Backed entirely by `SocialGraph`, which holds a single `friendship_edges()`
 /// result. There is no separate "my friends" fetch — the list and the badge
@@ -19,13 +19,83 @@ import SwiftUI
 struct FriendsView: View {
     let userID: UUID
 
+    var body: some View {
+        FriendsNavigationStack(userID: userID)
+    }
+}
+
+/// Friends-tab navigation destinations. One enum rather than separate
+/// `ChatRoute` / `PersonSummary` pushes so the stack can be read when deciding
+/// whether the bottom bar should show — `onDisappear` on a pushed page fires
+/// after the pop animation, which is the delay users notice on the way back.
+enum FriendsRoute: Hashable {
+    case chat(PersonSummary)
+    case profile(PersonSummary)
+}
+
+/// Owns the friends list navigation stack — shared by the bottom tab and any
+/// full-screen presentation (e.g. from Profile).
+struct FriendsNavigationStack: View {
+    let userID: UUID
+    var showsDismissButton = false
+
+    @Environment(\.dismiss) private var dismiss
+    @Environment(AppRouter.self) private var router
     @Environment(SocialGraph.self) private var graph
     @Environment(ChatStore.self) private var chat
-    @Environment(SocialDemoMode.self) private var demo
 
-    @State private var path = NavigationPath()
-    @State private var query = ""
+    @State private var path: [FriendsRoute] = []
     @State private var showAddFriends = false
+
+    var body: some View {
+        NavigationStack(path: $path) {
+            FriendsListScreen(
+                userID: userID,
+                showsDismissButton: showsDismissButton,
+                onDismiss: showsDismissButton ? { dismiss() } : nil,
+                onAddFriends: { showAddFriends = true }
+            )
+            .navigationDestination(for: FriendsRoute.self) { route in
+                switch route {
+                case .chat(let person):
+                    ChatView(userID: userID, person: person)
+                case .profile(let person):
+                    FriendProfileView(person: person)
+                }
+            }
+        }
+        .onAppear { syncBottomBar(with: path) }
+        .onChange(of: path) { _, newPath in
+            syncBottomBar(with: newPath)
+        }
+        .fullScreenCover(isPresented: $showAddFriends) {
+            AddFriendsView()
+        }
+        .task {
+            graph.refresh()
+            chat.refreshThreads()
+        }
+    }
+
+    private func syncBottomBar(with path: [FriendsRoute]) {
+        router.hidesBottomBar = path.last.map {
+            if case .chat = $0 { true } else { false }
+        } ?? false
+    }
+}
+
+/// The searchable friends list. Embedded in `FriendsNavigationStack` so the
+/// same UI can live on the Friends tab or slide up full-screen from Profile.
+struct FriendsListScreen: View {
+    let userID: UUID
+    var showsDismissButton = false
+    var onDismiss: (() -> Void)?
+    var onAddFriends: () -> Void
+
+    @Environment(SocialGraph.self) private var graph
+    @Environment(ChatStore.self) private var chat
+
+    @State private var query = ""
 
     private var filteredFriends: [FriendshipEdge] {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -37,63 +107,46 @@ struct FriendsView: View {
     }
 
     var body: some View {
-        NavigationStack(path: $path) {
-            Group {
-                if !graph.hasLoaded && graph.friends.isEmpty {
-                    // First load. Distinguished from "no friends" so a slow
-                    // connection doesn't briefly accuse the user of having none.
-                    ProgressView()
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else if graph.friends.isEmpty {
-                    noFriendsState
-                } else {
-                    friendsList
-                }
+        Group {
+            if !graph.hasLoaded && graph.friends.isEmpty {
+                // First load. Distinguished from "no friends" so a slow
+                // connection doesn't briefly accuse the user of having none.
+                ProgressView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if graph.friends.isEmpty {
+                noFriendsState
+            } else {
+                friendsList
             }
-            .background(Color(uiColor: .systemBackground))
-            .navigationTitle("Friends")
-            .navigationBarTitleDisplayMode(.inline)
-            .appSearchable(text: $query, prompt: "Search friends")
-            .toolbar {
-                if demo.isEnabled {
-                    ToolbarItem(placement: .principal) {
-                        VStack(spacing: 1) {
-                            Text("Friends").font(.headline)
-                            Text("Sample people").font(.caption2).foregroundStyle(.orange)
-                        }
-                    }
-                }
-                ToolbarItem(placement: .topBarLeading) {
-                    Button {
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(uiColor: .systemBackground))
+        .navigationTitle("Friends")
+        .navigationBarTitleDisplayMode(.inline)
+        .appSearchable(text: $query, prompt: "Search friends")
+        .toolbar {
+            if showsDismissButton {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") {
                         Haptics.tap()
-                        showAddFriends = true
-                    } label: {
-                        Image(systemName: "person.badge.plus")
-                            .notificationDot(!graph.incoming.isEmpty)
+                        onDismiss?()
                     }
-                    .accessibilityLabel(
-                        graph.incoming.isEmpty
-                            ? "Add friends"
-                            : "Add friends, pending friend requests"
-                    )
                 }
             }
-            .navigationDestination(for: ChatRoute.self) { route in
-                ChatView(userID: userID, person: route.person)
+            ToolbarItem(placement: showsDismissButton ? .topBarTrailing : .topBarLeading) {
+                Button {
+                    Haptics.tap()
+                    onAddFriends()
+                } label: {
+                    Label("Add friends", systemImage: "person.badge.plus")
+                        .notificationDot(!graph.incoming.isEmpty)
+                }
+                .accessibilityLabel(
+                    graph.incoming.isEmpty
+                        ? "Add friends"
+                        : "Add friends, pending friend requests"
+                )
             }
-            // Still the profile: `PersonSummary` is what search results, request
-            // rows and the chat header push. Only the friends list itself has
-            // been re-pointed at a conversation.
-            .navigationDestination(for: PersonSummary.self) { person in
-                FriendProfileView(person: person)
-            }
-        }
-        .sheet(isPresented: $showAddFriends) {
-            AddFriendsView()
-        }
-        .task {
-            graph.refresh()
-            chat.refreshThreads()
         }
     }
 
@@ -103,7 +156,7 @@ struct FriendsView: View {
         List {
             Section {
                 ForEach(filteredFriends) { edge in
-                    NavigationLink(value: ChatRoute(person: edge.person)) {
+                    NavigationLink(value: FriendsRoute.chat(edge.person)) {
                         friendRow(edge)
                     }
                     .listRowBackground(Color.clear)
@@ -173,7 +226,7 @@ struct FriendsView: View {
 
             Button {
                 Haptics.tap()
-                showAddFriends = true
+                onAddFriends()
             } label: {
                 Label("Add friends", systemImage: "person.badge.plus")
                     .frame(minWidth: 200, minHeight: 44)

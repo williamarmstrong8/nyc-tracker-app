@@ -91,15 +91,21 @@ struct SharePlacePicker: View {
                     list
                 }
             }
-            .background(Color(uiColor: .systemBackground))
+            .flatModalContentBackground()
             .navigationTitle("Attach a place")
             .navigationBarTitleDisplayMode(.inline)
+            .appSearchable(text: $query, prompt: "Search your places")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
+                    Button("Cancel") {
+                        Haptics.tap()
+                        dismiss()
+                    }
                 }
             }
+            .flatModalToolbarBackground()
         }
+        .flatModalBackground()
         .presentationDragIndicator(.visible)
     }
 
@@ -116,9 +122,6 @@ struct SharePlacePicker: View {
             }
             .padding(.horizontal, 10)
             .padding(.top, 8)
-        }
-        .safeAreaInset(edge: .top, spacing: 0) {
-            searchField
         }
     }
 
@@ -171,34 +174,15 @@ struct SharePlacePicker: View {
         dismiss()
     }
 
-    /// The picked visit's own photo, on disk. Prefers the thumbnail — the
-    /// attachment chip and the sent card both draw it small.
+    /// The picked visit's own photo, on disk. Prefers the full image so the
+    /// composer chip and (in sample mode) the sent card match the sharp chat
+    /// preview; falls back to the thumb if only that exists.
     private func localPhotoPath(for visit: Visit) -> String? {
         guard let photo = visit.photos.sorted(by: { $0.order < $1.order }).first else {
             return nil
         }
-        guard let path = photo.thumbRelativePath ?? photo.relativePath else { return nil }
+        guard let path = photo.relativePath ?? photo.thumbRelativePath else { return nil }
         return "local:" + path
-    }
-
-    private var searchField: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "magnifyingglass")
-                .foregroundStyle(.secondary)
-            TextField("Search your places", text: $query)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .background(
-            Capsule(style: .continuous)
-                .fill(Color(uiColor: .secondarySystemFill))
-        )
-        .padding(.horizontal, 16)
-        .padding(.top, 8)
-        .padding(.bottom, 8)
-        .background(Color(uiColor: .systemBackground))
     }
 
     private var emptyState: some View {

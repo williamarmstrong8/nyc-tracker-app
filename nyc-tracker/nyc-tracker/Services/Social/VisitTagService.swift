@@ -55,11 +55,6 @@ enum VisitTagService {
     /// Same row shape as `user_visits`, so the profile's two tabs decode into
     /// one type and open the same write-up sheet.
     static func taggedVisits(of userID: UUID, limit: Int = 100) async throws -> [FriendVisit] {
-        if let demo = SocialDemoMode.active {
-            await demo.simulateLatency()
-            return Array(demo.taggedVisits(of: userID).prefix(limit))
-        }
-
         return try await client
             .rpc("tagged_visits", params: UserVisitsParams(user: userID, limit: limit))
             .execute()

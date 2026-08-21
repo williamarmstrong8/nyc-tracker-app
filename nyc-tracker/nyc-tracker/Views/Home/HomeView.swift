@@ -14,9 +14,19 @@ struct HomeView: View {
     @Binding var openedVisit: Visit?
     @Binding var focusVisitID: Visit.ID?
     @Bindable var filter: EntryFilter
+    /// Forwarded straight to `MapHome` — a venue tapped on the map can log a
+    /// visit or save as want-to-try.
+    var onLogVisit: (VenueCandidate) -> Void
+    var onWantToTry: (VenueCandidate) -> Void
 
-    @State private var showSearch = false
+    @State private var isSearching = false
+    @State private var searchQuery = ""
+    @State private var includeAppleMapsSearch = false
+    @State private var hasLocalSearchMatches = false
+    @State private var showOtherLocationsPrompt = false
     @State private var listPath = NavigationPath()
+    @FocusState private var isSearchFieldFocused: Bool
+    @Namespace private var floatingControls
 
     /// Hide the floating toggle/filter/search row once the list has drilled into a category —
     /// it would otherwise sit on top of that screen's title and back button.
@@ -33,7 +43,12 @@ struct HomeView: View {
                         userID: userID,
                         openedVisit: $openedVisit,
                         focusVisitID: $focusVisitID,
-                        filter: filter
+                        searchQuery: $searchQuery,
+                        includeAppleMapsSearch: $includeAppleMapsSearch,
+                        hasLocalSearchMatches: $hasLocalSearchMatches,
+                        filter: filter,
+                        onLogVisit: onLogVisit,
+                        onWantToTry: onWantToTry
                     )
                     .ignoresSafeArea()
                 case .list:
@@ -48,14 +63,39 @@ struct HomeView: View {
                 .allowsHitTesting(true)
 
             if showFloatingControls {
-                ZStack {
-                    HomeModeToggle(mode: $mode)
-                    HStack {
-                        FilterButton(filter: filter, showsAudience: mode == .map)
-                        Spacer()
-                        SearchButton { showSearch = true }
+                GlassEffectContainer(spacing: 12) {
+                    ZStack {
+                        if isSearching {
+                            HomeSearchBar(
+                                text: $searchQuery,
+                                isFocused: $isSearchFieldFocused
+                            ) {
+                                closeSearch()
+                            }
+                            .glassEffectID("search", in: floatingControls)
+                            .padding(.horizontal, 16)
+                            .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                        } else {
+                            HomeModeToggle(mode: $mode)
+                                .glassEffectID("home-mode", in: floatingControls)
+
+                            HStack {
+                                FilterButton(filter: filter, showsAudience: mode == .map)
+                                    .glassEffectID("filter", in: floatingControls)
+                                Spacer()
+                                SearchButton {
+                                    Haptics.tap()
+                                    withAnimation(.smooth(duration: 0.36)) {
+                                        mode = .map
+                                        isSearching = true
+                                    }
+                                }
+                                .glassEffectID("search", in: floatingControls)
+                            }
+                            .padding(.horizontal, 16)
+                            .transition(.opacity)
+                        }
                     }
-                    .padding(.horizontal, 16)
                 }
                 // Matches the vertical offset of the toolbar buttons on every
                 // other tab (Explore/Friends/Profile), which sit inside a
@@ -63,12 +103,55 @@ struct HomeView: View {
                 // than 20pt below it.
                 .padding(.top, 8)
                 .transition(.opacity)
+
+                if isSearching, showOtherLocationsPrompt, hasLocalSearchMatches, !includeAppleMapsSearch {
+                    SearchOtherLocationsButton {
+                        Haptics.tap()
+                        isSearchFieldFocused = false
+                        withAnimation(.smooth(duration: 0.32)) {
+                            includeAppleMapsSearch = true
+                            showOtherLocationsPrompt = false
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 68)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+                }
             }
         }
         .animation(.default, value: showFloatingControls)
-        .sheet(isPresented: $showSearch) {
-            SearchVisitsView(userID: userID, openedVisit: $openedVisit)
-                .presentationBackground(Color(uiColor: .systemBackground))
+        .animation(.smooth(duration: 0.36), value: isSearching)
+        .animation(.smooth(duration: 0.32), value: showOtherLocationsPrompt)
+        .onChange(of: searchQuery) { _, _ in
+            includeAppleMapsSearch = false
+            showOtherLocationsPrompt = false
+        }
+        .task(id: otherLocationsPromptTaskID) {
+            guard isSearching, hasLocalSearchMatches, !includeAppleMapsSearch else {
+                showOtherLocationsPrompt = false
+                return
+            }
+            try? await Task.sleep(for: .seconds(1.5))
+            guard !Task.isCancelled else { return }
+            showOtherLocationsPrompt = true
+        }
+    }
+
+    private var otherLocationsPromptTaskID: String {
+        "\(searchQuery)|\(hasLocalSearchMatches)|\(includeAppleMapsSearch)|\(isSearching)"
+    }
+
+    private func closeSearch() {
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            isSearchFieldFocused = false
+        }
+        withAnimation(.smooth(duration: 0.36)) {
+            isSearching = false
+            searchQuery = ""
+            includeAppleMapsSearch = false
+            showOtherLocationsPrompt = false
         }
     }
 }
@@ -128,10 +211,6 @@ private struct FilterButton: View {
 
     @State private var showAudiencePicker = false
 
-    /// A curated list of tags to offer. In practice these are drawn from `VenueTag`, but presented
-    /// as their raw values so they line up with what enrichment writes to `Visit.tags`.
-    private let offeredTags: [String] = VenueTag.allCases.map(\.rawValue)
-
     private var isAudienceFiltered: Bool {
         showsAudience && audience.audience != .mine
     }
@@ -188,11 +267,14 @@ private struct FilterButton: View {
                 }
             }
             Menu("Tags") {
-                ForEach(offeredTags, id: \.self) { tag in
+                ForEach(VenueTag.allCases) { tag in
                     Button {
-                        toggle(tag: tag)
+                        toggle(tag: tag.rawValue)
                     } label: {
-                        Label(tag, systemImage: filter.tags.contains(tag) ? "checkmark" : "tag")
+                        Label(
+                            tag.label,
+                            systemImage: filter.tags.contains(tag.rawValue) ? "checkmark" : tag.symbol
+                        )
                     }
                 }
             }
@@ -255,7 +337,6 @@ private struct SearchButton: View {
 
     var body: some View {
         Button {
-            Haptics.tap()
             onTap()
         } label: {
             Image(systemName: "magnifyingglass")
@@ -265,5 +346,64 @@ private struct SearchButton: View {
         .buttonStyle(.glass)
         .buttonBorderShape(.circle)
         .accessibilityLabel("Search entries")
+    }
+}
+
+// MARK: - Expanded search bar
+
+private struct HomeSearchBar: View {
+    @Binding var text: String
+    @FocusState.Binding var isFocused: Bool
+    var onClose: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "magnifyingglass")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+
+            TextField("Search your places", text: $text)
+                .textFieldStyle(.plain)
+                .focused($isFocused)
+                .submitLabel(.search)
+
+            Button {
+                Haptics.tap()
+                onClose()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.subheadline.weight(.semibold))
+                    .frame(width: 32, height: 32)
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Close search")
+        }
+        .padding(.leading, 16)
+        .padding(.trailing, 8)
+        .frame(maxWidth: .infinity)
+        .frame(height: 52)
+        .glassEffect(.regular.interactive(), in: .capsule)
+        .onTapGesture { isFocused = true }
+        .task { isFocused = true }
+    }
+}
+
+// MARK: - Search other locations
+
+private struct SearchOtherLocationsButton: View {
+    var onTap: () -> Void
+
+    var body: some View {
+        Button(action: onTap) {
+            Label("Search other locations", systemImage: "mappin.and.ellipse")
+                .font(.subheadline.weight(.semibold))
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+        }
+        .buttonStyle(.glass)
+        .buttonBorderShape(.capsule)
+        .accessibilityHint("Shows matching places from Apple Maps on the map")
     }
 }

@@ -54,18 +54,29 @@ struct RootView: View {
                 // graph and the recommendations it holds are in memory here; the
                 // wishlist, feed, friend-visit and stats caches are `@State` on
                 // `ContentView` and die with its subtree when this view swaps
-                // away. The only social bytes that ever touched the disk are
-                // images in `PhotoCache`, cleared below. Nothing about another
-                // person — and nothing server-only, like the wishlist — was ever
-                // written to the user-scoped SwiftData store, so there is nothing
-                // there to clean up.
+                // away. What social bytes reached the disk went to `Caches/` —
+                // photos, avatars, and the launch snapshots — and all three are
+                // cleared below. Nothing about another person, and nothing
+                // server-only like the wishlist, was ever written to the
+                // user-scoped SwiftData store, so there is nothing there to
+                // clean up.
                 social.teardown()
                 // Messages are the one social surface with an open socket, so
                 // this teardown does more than drop state: it unsubscribes. A
                 // channel left running would keep delivering the previous
                 // account's messages into the next one's session.
                 chat.teardown()
+                // Everything cached to disk goes with the session. `PhotoCache`
+                // clears the decoded-image layer as part of its own teardown;
+                // avatars and snapshots are separate directories with separate
+                // owners, so each is asked directly.
+                //
+                // These are all `Caches/` — nothing here is user data, only
+                // copies of things the server will resend. Signing back in costs
+                // one round trip per surface and rebuilds all of it.
                 PhotoCache.shared.clear()
+                AvatarCache.shared.clear()
+                SnapshotStore.shared.clear()
             }
         }
         // Cross-fade rather than a slide: the loading -> signed-in transition

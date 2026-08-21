@@ -25,10 +25,16 @@ struct TagPeoplePicker: View {
         graph.friends.map(\.person)
     }
 
+    /// Friends not already tagged — the "Tagged" section above is the only
+    /// place a selected person appears, so they don't show up twice.
+    private var unselectedFriends: [PersonSummary] {
+        friends.filter { !selectedIDs.contains($0.id) }
+    }
+
     private var filtered: [PersonSummary] {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !trimmed.isEmpty else { return friends }
-        return friends.filter { person in
+        guard !trimmed.isEmpty else { return unselectedFriends }
+        return unselectedFriends.filter { person in
             person.bestName.lowercased().contains(trimmed)
                 || (person.username?.lowercased().contains(trimmed) ?? false)
         }
@@ -94,14 +100,19 @@ struct TagPeoplePicker: View {
                 }
             }
 
-            Section(selectedPeople.isEmpty ? "Friends" : "All friends") {
-                if filtered.isEmpty {
-                    Text("No friends match \u{201C}\(query)\u{201D}.")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                } else {
-                    ForEach(filtered) { person in
-                        row(person)
+            // Hidden entirely once every friend is tagged and the search field
+            // is empty — an empty "Other friends" section under "Tagged" reads
+            // as broken, not as "you've tagged everyone."
+            if !unselectedFriends.isEmpty || !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Section(selectedPeople.isEmpty ? "Friends" : "Other friends") {
+                    if filtered.isEmpty {
+                        Text("No friends match \u{201C}\(query)\u{201D}.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(filtered) { person in
+                            row(person)
+                        }
                     }
                 }
             }

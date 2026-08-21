@@ -21,10 +21,11 @@ import SwiftData
 /// - Never mirrors a place the user has already **been** to. A want-to-try pin
 ///   sitting on top of somewhere you wrote up is worse than no pin.
 /// - Never creates a second entry for a place already in the local list.
-/// - On unsave, only removes an entry it could plausibly have created — a
-///   want-to-try with no photos and no transcript. A want-to-try the user typed
-///   themselves, with a voice note and pictures, is their writing; unsaving a
+/// - On unsave, only removes an entry it could plausibly have created — flagged
+///   with `wishlistMirror`, or a bare want-to-try with no photos and no note.
+///   A want-to-try the user wrote themselves is their writing; unsaving a
 ///   wishlist item must not delete it.
+@MainActor
 struct WantToTryMirror {
     let context: ModelContext
     let userID: UUID
@@ -37,19 +38,12 @@ struct WantToTryMirror {
 
     /// Add `place` to the local Want to try list. Idempotent.
     ///
-    /// Returns whether a new entry was created, so the caller can tell "saved"
-    /// from "already there" without re-querying.
+    /// When `source` is a friend's visit, its photos, note, tags, and title are
+    /// copied so the saved row opens in the same full write-up the user's own
+    /// entries use. Returns whether a new entry was created or an existing mirror
+    /// was enriched.
     @discardableResult
-    func mirror(_ place: PlaceSummary) -> Bool {
-        // Already represented locally under this remote id — a previous save, or
-        // a pull of the same venue.
-        if let existing = localPlace(forRemote: place.id), !existing.visits.isEmpty {
-            return false
-        }
-
-        // Same venue, different local row: the user logged it before it was ever
-        // deduped upstream. Reuses the repository's POI/name/150m matching so the
-        // rule is the same one the capture flow uses.
+    func mirror(_ place: PlaceSummary, from source: FriendVisit? = nil) async -> Bool {
         if repository.existingVisitedVisit(
             externalPOIId: nil,
             name: place.name,
@@ -58,6 +52,17 @@ struct WantToTryMirror {
                 longitude: place.longitude
             )
         ) != nil {
+            return false
+        }
+
+        if let local = localPlace(forRemote: place.id),
+           let existing = local.visits.first(where: { $0.kind == .wantToTry && $0.wishlistMirror }) {
+            return await enrich(existing, from: source)
+        }
+
+        // Already represented locally under this remote id — a previous save, or
+        // a pull of the same venue that is not a wishlist mirror.
+        if let existing = localPlace(forRemote: place.id), !existing.visits.isEmpty {
             return false
         }
 
@@ -72,13 +77,17 @@ struct WantToTryMirror {
         )
 
         let visit = Visit(
-            title: place.name,
+            title: source?.headline ?? place.name,
+            tags: source?.tags ?? [],
+            note: trimmedNote(from: source),
             address: place.streetAddress,
             locationSource: .manual,
             kind: .wantToTry
         )
+        visit.wishlistMirror = true
 
-        repository.insert(place: local, visit: visit, photos: [])
+        let photos = await photos(from: source)
+        repository.insert(place: local, visit: visit, photos: photos)
         return true
     }
 
@@ -91,7 +100,8 @@ struct WantToTryMirror {
         guard let local = localPlace(forRemote: placeID) else { return false }
 
         let candidates = local.visits.filter {
-            $0.kind == .wantToTry && $0.photos.isEmpty && $0.transcript.isEmpty
+            $0.kind == .wantToTry
+                && ($0.wishlistMirror || ($0.photos.isEmpty && $0.note.isEmpty))
         }
         guard !candidates.isEmpty else { return false }
 
@@ -99,6 +109,101 @@ struct WantToTryMirror {
             repository.delete(visit)
         }
         return true
+    }
+
+    // MARK: - Enrichment
+
+    /// Fill in content on a bare mirror row — e.g. the wishlist refresh ran
+    /// before the user opened the friend's write-up and tapped Save.
+    @discardableResult
+    private func enrich(_ visit: Visit, from source: FriendVisit?) async -> Bool {
+        guard let source else { return false }
+
+        var changed = false
+
+        if visit.note.isEmpty {
+            let note = trimmedNote(from: source)
+            if !note.isEmpty {
+                visit.note = note
+                changed = true
+            }
+        }
+        if visit.tags.isEmpty, !source.tags.isEmpty {
+            visit.tags = source.tags
+            changed = true
+        }
+        if visit.title == visit.place?.name || visit.title.isEmpty,
+           visit.title != source.headline {
+            visit.title = source.headline
+            changed = true
+        }
+        if visit.photos.isEmpty {
+            let photos = await photos(from: source)
+            if !photos.isEmpty {
+                for photo in photos {
+                    photo.visit = visit
+                    context.insert(photo)
+                }
+                changed = true
+            }
+        }
+
+        guard changed else { return false }
+        visit.markDirty()
+        try? context.save()
+        return true
+    }
+
+    // MARK: - Photos
+
+    /// Copy a friend's photos into Application Support so the mirrored visit
+    /// renders offline and sync uploads the user's own objects upstream.
+    private func photos(from source: FriendVisit?) async -> [Photo] {
+        guard let source, !source.photos.isEmpty else { return [] }
+
+        var rows: [Photo] = []
+        let ordered = source.photos.sorted { $0.sortOrder < $1.sortOrder }
+
+        for (index, friendPhoto) in ordered.enumerated() {
+            guard let fullURL = await resolvedFileURL(for: friendPhoto.storagePath),
+                  let fullData = try? Data(contentsOf: fullURL),
+                  let stored = try? FileStorage.writeData(fullData, kind: .photos, fileExtension: "jpg")
+            else { continue }
+
+            var thumbRelativePath: String?
+            if let thumbPath = friendPhoto.thumbPath,
+               let thumbURL = await resolvedFileURL(for: thumbPath),
+               let thumbData = try? Data(contentsOf: thumbURL),
+               let storedThumb = try? FileStorage.writeData(thumbData, kind: .photos, fileExtension: "jpg") {
+                thumbRelativePath = storedThumb.relativePath
+            }
+
+            rows.append(Photo(
+                relativePath: stored.relativePath,
+                thumbRelativePath: thumbRelativePath,
+                order: index
+            ))
+        }
+
+        return rows
+    }
+
+    private func resolvedFileURL(for path: String) async -> URL? {
+        if path.hasPrefix("asset:") { return nil }
+        if path.hasPrefix("local:") {
+            let relative = String(path.dropFirst("local:".count))
+            let url = FileStorage.url(forRelativePath: relative)
+            return FileManager.default.fileExists(atPath: url.path) ? url : nil
+        }
+        return await PhotoCache.shared.file(for: path)
+    }
+
+    private func trimmedNote(from source: FriendVisit?) -> String {
+        guard let summary = source?.summary?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !summary.isEmpty else {
+            return ""
+        }
+        return summary
     }
 
     // MARK: - Lookup

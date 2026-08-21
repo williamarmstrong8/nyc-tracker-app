@@ -19,17 +19,10 @@ import SwiftUI
 /// Asking for a time as well would be precision nobody has and would break that.
 struct VisitDateField: View {
     @Binding var date: Date
-    /// Shown under the picker while the date is still today, and dropped once
-    /// the user has moved it — at that point the picker says it all.
-    var showsHint: Bool = true
 
     /// No future visits. A date ahead of now is either a typo or a want-to-try,
     /// and want-to-try is a different kind of entry with its own flow.
     private var range: PartialRangeThrough<Date> { ...Date() }
-
-    private var isToday: Bool {
-        Calendar.current.isDateInToday(date)
-    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -46,13 +39,6 @@ struct VisitDateField: View {
             .labelsHidden()
             .datePickerStyle(.compact)
             .frame(maxWidth: .infinity, alignment: .leading)
-
-            if showsHint, isToday {
-                Text("Defaults to today — change it if you're logging an older visit.")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Date of visit")

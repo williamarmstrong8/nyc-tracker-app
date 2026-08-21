@@ -1,5 +1,53 @@
 import SwiftUI
 
+/// A search field that lives in the page hierarchy instead of being installed
+/// into `UINavigationItem` by `.searchable`.
+///
+/// Keep this for screens that push another destination. UIKit removes the
+/// navigation item's search controller during the push and restores it after
+/// the pop transition, which makes its glass surface appear a beat late.
+/// Because this field is ordinary SwiftUI content, it transitions with the
+/// page and its glass is present on the first returning frame.
+struct AppInlineSearchField: View {
+    @Binding var text: String
+    let prompt: String
+
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+
+            TextField(prompt, text: $text)
+                .textFieldStyle(.plain)
+                .focused($isFocused)
+                .submitLabel(.search)
+
+            if !text.isEmpty {
+                Button {
+                    text = ""
+                    isFocused = true
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Clear search")
+            }
+        }
+        .padding(.horizontal, 14)
+        .frame(minHeight: 44)
+        .contentShape(.capsule)
+        .glassEffect(.regular.interactive(), in: .capsule)
+        .onTapGesture {
+            isFocused = true
+        }
+        .accessibilityElement(children: .contain)
+    }
+}
+
 extension View {
     /// The app's one search field: a nav-bar drawer that is always shown, on a
     /// toolbar background that is already there when the page arrives.

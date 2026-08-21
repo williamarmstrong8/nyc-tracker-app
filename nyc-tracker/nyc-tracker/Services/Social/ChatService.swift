@@ -16,11 +16,6 @@ enum ChatService {
     /// counts. One call backs the friends-list previews, the per-row unread dot,
     /// and the tab badge.
     static func threads() async throws -> [ConversationThread] {
-        if let demo = SocialDemoMode.active {
-            await demo.simulateLatency()
-            return demo.conversationThreads()
-        }
-
         return try await client
             .rpc("conversation_threads")
             .execute()
@@ -33,11 +28,6 @@ enum ChatService {
     /// because "has this thread been created yet" is a question the server can
     /// answer in the same round trip it would take to ask.
     static func openConversation(with userID: UUID) async throws -> UUID {
-        if let demo = SocialDemoMode.active {
-            await demo.simulateLatency()
-            return demo.openConversation(with: userID)
-        }
-
         return try await client
             .rpc("open_conversation", params: ["p_other": userID.uuidString])
             .execute()
@@ -64,11 +54,6 @@ enum ChatService {
         before cursor: Date? = nil,
         limit: Int = 50
     ) async throws -> [ChatMessage] {
-        if let demo = SocialDemoMode.active {
-            await demo.simulateLatency()
-            return demo.messages(in: conversationID)
-        }
-
         var query = client
             .from("message_details")
             .select()
@@ -92,27 +77,13 @@ enum ChatService {
     /// The composed row comes back from the insert so the bubble can be drawn
     /// from real server state — including the venue join and the photos — rather
     /// than from a locally assembled guess that a refresh then replaces.
-    /// `preview` is ignored on the wire and used only by sample mode, which has
-    /// no server row to read back and no knowledge of the user's own places.
     static func send(
         conversation conversationID: UUID,
         body: String,
         place placeID: UUID?,
-        visit visitID: UUID?,
-        preview: SharedPlacePreview? = nil
+        visit visitID: UUID?
     ) async throws -> ChatMessage {
         let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        if let demo = SocialDemoMode.active {
-            await demo.simulateLatency()
-            return demo.sendMessage(
-                conversation: conversationID,
-                body: trimmed,
-                place: placeID,
-                visit: visitID,
-                preview: preview
-            )
-        }
 
         let params = SendMessageParams(
             conversation: conversationID,
@@ -138,11 +109,6 @@ enum ChatService {
     /// device clock produces "read before it was sent" orderings that surface
     /// much later as an inexplicable unread count.
     static func markRead(conversation conversationID: UUID) async throws {
-        if let demo = SocialDemoMode.active {
-            demo.markConversationRead(conversationID)
-            return
-        }
-
         try await client
             .rpc("mark_conversation_read", params: ["p_conversation": conversationID.uuidString])
             .execute()

@@ -21,6 +21,11 @@ struct UserSearchView: View {
     @State private var results: [ProfileSearchResult] = []
     @State private var isSearching = false
     @State private var searchFailed = false
+    /// Friends-of-friends shown in place of the old "No requests" empty
+    /// state. `nil` means "haven't asked yet" — nothing shows either way,
+    /// but keeping it distinct from `[]` avoids a one-frame flash of empty
+    /// state before the request lands.
+    @State private var recommended: [RecommendedFriend]?
     /// The person whose action button is mid-flight, so only that row spins.
     @State private var busyPersonID: UUID?
     @State private var searchTask: Task<Void, Never>?
@@ -65,7 +70,11 @@ struct UserSearchView: View {
             scheduleSearch(for: newValue)
         }
         .task { graph.refresh() }
-        .refreshable { await graph.reload() }
+        .task { await loadRecommended() }
+        .refreshable {
+            await graph.reload()
+            await loadRecommended()
+        }
         .onDisappear { searchTask?.cancel() }
     }
 
@@ -74,7 +83,7 @@ struct UserSearchView: View {
     @ViewBuilder
     private var requestsContent: some View {
         if incoming.isEmpty && outgoing.isEmpty {
-            emptyRequestsSection
+            recommendedContent
         } else {
             if !incoming.isEmpty {
                 Section("Incoming") {
@@ -120,22 +129,44 @@ struct UserSearchView: View {
         }
     }
 
-    private var emptyRequestsSection: some View {
-        Section {
-            VStack(spacing: 10) {
-                Image(systemName: "person.crop.circle.badge.questionmark")
-                    .font(.system(size: 34, weight: .light))
-                    .foregroundStyle(.secondary)
-                Text("No requests")
-                    .font(.headline)
-                Text("Search to find friends. Sent and received requests show up here.")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
+    // MARK: - Recommended (shown when there are no pending requests)
+
+    /// Friends-of-friends in place of the old "No requests" placeholder.
+    /// Nothing at all when there's nothing to recommend — no icon, no
+    /// copy, no `Section` — which is also what keeps this free of the
+    /// separator lines a `Section` draws above and below itself even
+    /// without a header.
+    @ViewBuilder
+    private var recommendedContent: some View {
+        if let recommended, !recommended.isEmpty {
+            Text("Recommended")
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .listRowSeparator(.hidden)
+                .listRowBackground(Color.clear)
+                .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 4, trailing: 16))
+
+            ForEach(recommended) { candidate in
+                recommendedRow(candidate)
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+                    .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
             }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 32)
-            .listRowBackground(Color.clear)
+        }
+    }
+
+    private func recommendedRow(_ candidate: RecommendedFriend) -> some View {
+        HStack(alignment: .center, spacing: 12) {
+            FriendPersonRow(person: candidate.person, subtitle: candidate.mutualFriendsLabel)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            RelationshipButton(
+                person: candidate.person,
+                relationship: .none,
+                isBusy: busyPersonID == candidate.id
+            ) { action in
+                handle(action, person: candidate.person, friendshipID: nil)
+            }
         }
     }
 
@@ -180,6 +211,12 @@ struct UserSearchView: View {
     }
 
     // MARK: - Search
+
+    /// Best-effort — a failed fetch just keeps the section hidden rather
+    /// than showing an error over what used to be a quiet empty state.
+    private func loadRecommended() async {
+        recommended = try? await FriendshipService.recommendedFriends()
+    }
 
     private func scheduleSearch(for raw: String) {
         searchTask?.cancel()

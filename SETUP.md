@@ -248,10 +248,10 @@ Nothing else is needed in the signing pane.
 > app traps at launch.
 
 ```bash
-cp nyc-tracker/Config/Secrets.example.xcconfig nyc-tracker/Config/Secrets.xcconfig
+cp nyc-tracker/Secrets.example.xcconfig nyc-tracker/Secrets.xcconfig
 ```
 
-Open `nyc-tracker/Config/Secrets.xcconfig` and fill in the two values from step 1.3:
+Open `nyc-tracker/Secrets.xcconfig` and fill in the two values from step 1.3:
 
 ```
 SUPABASE_PROJECT_HOST = abcdefghijklmnop.supabase.co
@@ -269,13 +269,19 @@ next to each other in the dashboard and differ by one word.
 
 Then wire it into the build:
 
-1. In Xcode, **File → Add Files to "nyc-tracker"…**, select the `Config` folder,
-   and add it **without** ticking "Add to targets" (an xcconfig is a build input,
-   not a bundled resource).
-2. Select the **project** (blue icon, not the target) → **Info** tab →
-   **Configurations**.
-3. Expand **Debug** and **Release**, and set the dropdown for the `nyc-tracker`
-   project to **Secrets** in both.
+1. In Xcode, **File → Add Files to "nyc-tracker"…** and select
+   `nyc-tracker/Secrets.xcconfig`. Add it **without** ticking "Add to targets" —
+   an xcconfig is a build input, not a bundled resource. Ticking it copies your
+   credentials into the shipped `.app`, where `strings` recovers them.
+2. Select the **project** (blue icon) → **Info** tab → **Configurations**.
+3. Expand **Debug** *and* **Release**. Under each, set the dropdown on the
+   `nyc-tracker` **target** row (the indented one, app icon — not the project
+   row above it) to **Secrets**.
+
+   **Release is not optional.** It is the configuration `Product → Archive`
+   uses, so a Release without the file produces a build that compiles, signs,
+   uploads to TestFlight, and then hard-crashes on launch inside
+   `SupabaseConfig` — with no compile-time warning anywhere.
 4. **Product → Clean Build Folder** (⇧⌘K), then build.
 
 `Info.plist` already references `$(SUPABASE_PROJECT_HOST)` and
@@ -286,6 +292,13 @@ than the source one (the source always shows the literal `$(...)`):
 
 ```bash
 plutil -extract SupabasePublishableKey raw -o - "$(ls -dt ~/Library/Developer/Xcode/DerivedData/nyc-tracker-*/Build/Products/Debug-iphonesimulator/nyc-tracker.app | head -1)/Info.plist"
+```
+
+And confirm **Release** resolves them too — this is the check that would have
+caught the crash before it shipped. Both lines must print a value:
+
+```bash
+xcodebuild -project nyc-tracker/nyc-tracker.xcodeproj -target nyc-tracker -configuration Release -showBuildSettings 2>/dev/null | grep SUPABASE
 ```
 
 That must print a real `sb_publishable_...` value. If it prints the literal
@@ -411,7 +424,7 @@ Run these in order. Simulator A and B need **different Apple IDs** —
   `.gitignore` edit:
 
   ```bash
-  git check-ignore -v nyc-tracker/Config/Secrets.xcconfig
+  git check-ignore -v nyc-tracker/Secrets.xcconfig
   ```
 
   Silence with a non-zero exit means it is **not** ignored — fix that before

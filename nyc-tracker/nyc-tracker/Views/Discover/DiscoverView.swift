@@ -10,7 +10,6 @@ struct DiscoverView: View {
     @Environment(SocialGraph.self) private var graph
     @Environment(FeedStore.self) private var feed
     @Environment(AppRouter.self) private var router
-    @Environment(SocialDemoMode.self) private var demo
 
     @State private var openedItem: FeedItem?
     @State private var showAddFriends = false
@@ -55,7 +54,7 @@ struct DiscoverView: View {
             .navigationDestination(for: PersonSummary.self) { person in
                 FriendProfileView(person: person)
             }
-            .sheet(isPresented: $showAddFriends) {
+            .fullScreenCover(isPresented: $showAddFriends) {
                 AddFriendsView()
             }
             .sheet(item: $openedItem) { item in
@@ -68,10 +67,9 @@ struct DiscoverView: View {
                             router.showMap()
                         }
                     )
-                    .toolbarBackground(Color(uiColor: .systemBackground), for: .navigationBar)
-                    .toolbarBackgroundVisibility(.visible, for: .navigationBar)
+                    .flatModalToolbarBackground()
                 }
-                .presentationBackground(Color(uiColor: .systemBackground))
+                .flatModalBackground()
             }
         }
         .task { feed.refresh() }
@@ -85,9 +83,6 @@ struct DiscoverView: View {
 
         return VStack(spacing: 1) {
             Text("Explore").font(.headline)
-            if demo.isEnabled {
-                Text("Sample activity").font(.caption2).foregroundStyle(.orange)
-            }
         }
         .opacity(1 - progress)
         .offset(y: -travel)
@@ -125,6 +120,7 @@ struct DiscoverView: View {
             .padding(.horizontal, 1)
             .padding(.vertical, 12)
         }
+        .contentMargins(.bottom, BottomNavBar.scrollContentClearance, for: .scrollContent)
         .refreshable { await feed.reload() }
         .scrollEdgeEffectHidden(true, for: .top)
         .onScrollGeometryChange(for: CGFloat.self) { geometry in
@@ -242,15 +238,11 @@ private struct FeedCard: View {
     }
 
     private var summaryText: String? {
-        if let summary = visit.summary?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !summary.isEmpty {
-            return summary
+        guard let summary = visit.summary?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !summary.isEmpty else {
+            return nil
         }
-        if let transcript = visit.transcript?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !transcript.isEmpty {
-            return transcript
-        }
-        return nil
+        return summary
     }
 
     var body: some View {
@@ -300,7 +292,7 @@ private struct FeedCard: View {
 
             Spacer(minLength: 0)
 
-            ExplorePlaceActions(place: visit.placeSummary, photo: photoSources.first)
+            ExplorePlaceActions(place: visit.placeSummary, sourceVisit: visit, photo: photoSources.first)
         }
     }
 
@@ -371,6 +363,7 @@ private struct FeedCard: View {
 /// sheet's functional layer.
 private struct ExplorePlaceActions: View {
     let place: PlaceSummary
+    var sourceVisit: FriendVisit? = nil
     var photo: PhotoView.Source? = nil
 
     @Environment(WishlistStore.self) private var wishlist
@@ -466,7 +459,7 @@ private struct ExplorePlaceActions: View {
         } else {
             let success = await wishlist.add(placeID: place.id)
             if success {
-                mirror?.mirror(place)
+                await mirror?.mirror(place, from: sourceVisit)
                 announceSaved()
             }
         }

@@ -139,6 +139,18 @@ enum ProfileService {
         let publicURL = try client.storage.from("avatars").getPublicURL(path: path)
         let bustedURL = "\(publicURL.absoluteString)?v=\(Int(Date().timeIntervalSince1970))"
 
+        // Seed the local cache with the bytes we just uploaded, under the new
+        // URL. Without this the user's own new picture is the one image in the
+        // app that has to be downloaded to be seen — and it is the image they
+        // are most obviously waiting on. It also sidesteps the window where the
+        // CDN has not yet picked the object up.
+        //
+        // Writing under the busted URL is what retires the previous version:
+        // `AvatarCache` keys on that URL and deletes the file the old one was
+        // cached under, so a person who changes their picture often leaves one
+        // file behind rather than one per upload.
+        AvatarCache.shared.prime(jpegData, for: bustedURL)
+
         return try await client
             .from("profiles")
             .update(ProfileUpdate(avatarURL: bustedURL))

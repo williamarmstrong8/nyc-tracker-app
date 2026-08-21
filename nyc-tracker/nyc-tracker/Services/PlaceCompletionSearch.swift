@@ -23,14 +23,19 @@ final class PlaceCompletionSearch: NSObject, MKLocalSearchCompleterDelegate {
         )
     }
 
+    /// Center the completer on the map viewport (or caller-supplied context).
+    func setRegion(_ region: MKCoordinateRegion) {
+        completer.region = region
+    }
+
     /// Center the region on the user's current context, if we know it (photo GPS / device location).
     func setBias(_ coordinate: CLLocationCoordinate2D?) {
         guard let coordinate else { return }
-        completer.region = MKCoordinateRegion(
+        setRegion(MKCoordinateRegion(
             center: coordinate,
             latitudinalMeters: 20_000,
             longitudinalMeters: 20_000
-        )
+        ))
     }
 
     func update(query: String) {
@@ -48,6 +53,23 @@ final class PlaceCompletionSearch: NSObject, MKLocalSearchCompleterDelegate {
     static func resolve(_ completion: MKLocalSearchCompletion) async -> VenueCandidate? {
         let request = MKLocalSearch.Request(completion: completion)
         request.resultTypes = [.pointOfInterest, .address]
+        guard let response = try? await MKLocalSearch(request: request).start(),
+              let item = response.mapItems.first
+        else {
+            return nil
+        }
+        return VenueCandidate.from(mapItem: item)
+    }
+
+    /// Map search variant — biases resolution to the visible viewport so a
+    /// partial name in NYC does not land on a homonym three time zones away.
+    static func resolve(
+        _ completion: MKLocalSearchCompletion,
+        in region: MKCoordinateRegion
+    ) async -> VenueCandidate? {
+        let request = MKLocalSearch.Request(completion: completion)
+        request.resultTypes = [.pointOfInterest, .address]
+        request.region = region
         guard let response = try? await MKLocalSearch(request: request).start(),
               let item = response.mapItems.first
         else {

@@ -1,34 +1,42 @@
 import SwiftUI
 import PhotosUI
+import MapKit
+import UIKit
 
 struct DetailsView: View {
     @Bindable var coordinator: CaptureCoordinator
-    let enricher: EnricherProtocol
 
     @State private var recorder: any RecorderProtocol = SpeechRecorder()
     @State private var showTagPeople = false
     @FocusState private var focusedField: Field?
 
-    enum Field: Hashable { case address, name, tags }
+    enum Field: Hashable { case note }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 photoStrip
 
-                VisitDateField(date: $coordinator.visitedOn)
-
                 TagPeopleField(tagged: coordinator.taggedPeople) {
                     showTagPeople = true
                 }
 
-                voiceMemoSection
+                LocationSearchField(
+                    nameInput: $coordinator.nameInput,
+                    addressInput: $coordinator.addressInput,
+                    selectedVenue: $coordinator.preselectedVenue
+                )
+                .zIndex(10)
 
-                fieldsSection
+                noteSection
+
+                VenueTagField(selection: $coordinator.draftTags)
+
+                RatingField(rating: $coordinator.draftRating)
+
+                VisitDateField(date: $coordinator.visitedOn)
 
                 submitButton
-
-                Spacer(minLength: 40)
             }
             .padding(.horizontal, 20)
             .padding(.top, 12)
@@ -37,7 +45,12 @@ struct DetailsView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .keyboard) {
-                Button("Done") { focusedField = nil }
+                Button("Done") {
+                    focusedField = nil
+                    // LocationSearchField owns its own FocusState, so this is
+                    // the only way "Done" can also dismiss that field's keyboard.
+                    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                }
             }
         }
         .sheet(isPresented: $showTagPeople) {
@@ -45,77 +58,51 @@ struct DetailsView: View {
                 coordinator.taggedPeople = picked
             }
         }
-        .task {
-            // Prewarm the on-device model so the first submit is snappier.
-            await enricher.prewarm()
-        }
     }
 
     // MARK: - Sections
 
     private var photoStrip: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 10) {
-                // Keyed by offset, not by `itemIdentifier`: the same library
-                // asset can legitimately be picked twice, and duplicate ForEach
-                // ids drop rows.
-                ForEach(Array(coordinator.selectedItems.enumerated()), id: \.offset) { _, item in
-                    PhotoView(source: .pickerItem(item), contentMode: .fill)
-                        .frame(width: 140, height: 140 * 4 / 3)
-                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                }
-            }
-        }
+        ReorderablePhotoStrip(
+            items: $coordinator.selectedItems,
+            thumbnailWidth: 140,
+            thumbnailHeight: 140 * 4 / 3,
+            cornerRadius: 16
+        )
     }
 
-    private var voiceMemoSection: some View {
+    private var noteSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HoldToRecordButton(recorder: recorder, hasRecording: !coordinator.transcript.isEmpty) { result in
-                coordinator.transcript = result.transcript
+            // Dictating fills this in, but it's an ordinary text field — typing
+            // here instead of (or on top of) recording is equally valid input,
+            // and either way the text is saved exactly as it reads.
+            LabeledField(
+                title: "Description",
+                text: $coordinator.note,
+                placeholder: "Record below, or type what you want to remember about this place…",
+                axis: .vertical,
+                lineLimit: 3...10
+            )
+            .focused($focusedField, equals: .note)
+
+            // Appended, not assigned: the field is now the entry's description,
+            // and the user may well have typed into it before reaching for the
+            // mic. Silently replacing that is the one thing dictation must not do.
+            HoldToRecordButton(recorder: recorder, hasRecording: coordinator.hadVoiceNote) { result in
+                let spoken = result.transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !spoken.isEmpty {
+                    coordinator.note = coordinator.note.isEmpty ? spoken : "\(coordinator.note)\n\n\(spoken)"
+                }
                 coordinator.hadVoiceNote = result.hadRecording
             }
-            .frame(maxWidth: .infinity, alignment: coordinator.transcript.isEmpty ? .leading : .center)
-
-            if !coordinator.transcript.isEmpty {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Transcript")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                    Text(coordinator.transcript)
-                        .font(.subheadline)
-                        .foregroundStyle(.primary)
-                        .padding(12)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(
-                            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                .fill(Color(uiColor: .secondarySystemBackground))
-                        )
-                }
-            }
-        }
-    }
-
-    private var fieldsSection: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            LabeledField(title: "Name (optional)", text: $coordinator.nameInput,
-                         placeholder: "e.g. Lucali")
-                .focused($focusedField, equals: .name)
-
-            LabeledField(title: "Address (optional)", text: $coordinator.addressInput,
-                         placeholder: "e.g. 575 Henry St, Brooklyn")
-                .focused($focusedField, equals: .address)
-
-            LabeledField(title: "Tags (comma separated, optional)",
-                         text: $coordinator.tagsInput,
-                         placeholder: "pizza, date night")
-                .focused($focusedField, equals: .tags)
+            .frame(maxWidth: .infinity, alignment: .center)
         }
     }
 
     private var submitButton: some View {
         Button {
             Haptics.tap()
-            Task { await coordinator.submitDetails(using: enricher) }
+            Task { await coordinator.submitDetails() }
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: "checkmark")
@@ -127,5 +114,4 @@ struct DetailsView: View {
         .buttonStyle(.glassProminent)
     }
 }
-
 

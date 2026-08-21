@@ -11,7 +11,6 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(AuthManager.self) private var auth
     @Environment(SyncEngine.self) private var sync
-    @Environment(AppRouter.self) private var router
 
     @State private var displayName = ""
     @State private var isSaving = false
@@ -56,11 +55,7 @@ struct SettingsView: View {
                 .disabled(!hasChanges || isSaving)
             }
         }
-        .onAppear {
-            loadFields()
-            router.hidesBottomBar = true
-        }
-        .onDisappear { router.hidesBottomBar = false }
+        .onAppear { loadFields() }
         .onChange(of: avatarItem) { _, item in
             guard let item else { return }
             Task { await uploadAvatar(item) }
@@ -155,13 +150,7 @@ struct SettingsView: View {
     private var avatarPicker: some View {
         PhotosPicker(selection: $avatarItem, matching: .images, photoLibrary: .shared()) {
             ZStack {
-                if let urlString = profile?.avatarURL, let url = URL(string: urlString) {
-                    AsyncImage(url: url) { image in
-                        image.resizable().scaledToFill()
-                    } placeholder: {
-                        avatarPlaceholder
-                    }
-                } else {
+                AvatarImage(urlString: profile?.avatarURL) {
                     avatarPlaceholder
                 }
 
@@ -185,10 +174,13 @@ struct SettingsView: View {
         .accessibilityLabel("Change profile photo")
     }
 
+    @ViewBuilder
     private var avatarPlaceholder: some View {
-        Image("Logo")
-            .resizable()
-            .scaledToFill()
+        if let profile {
+            PersonInitialsView(person: profile.personSummary)
+        } else {
+            PersonUnknownAvatar()
+        }
     }
 
     private var profileSection: some View {

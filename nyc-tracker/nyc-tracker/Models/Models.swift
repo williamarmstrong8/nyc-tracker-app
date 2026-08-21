@@ -12,58 +12,52 @@ enum PlaceCategory: String, Codable, CaseIterable, Sendable {
     case other
 }
 
+/// Did you like it or not. The whole verdict on a place.
+///
+/// This used to be a four-point scale (`loved` / `liked` / `fine` / `no`) with a
+/// separate "would you return" question next to it. Two answers on a scale
+/// nobody calibrates the same way twice is more precision than anyone has about
+/// dinner, so it is one question now.
+///
+/// `notLiked` keeps `no` as its raw value: `visits.rating_label` carries a CHECK
+/// constraint listing the four old labels, and reusing one of them is cheaper
+/// than a migration for a column whose meaning didn't change. `Visit.rating`
+/// reads through `from(loose:)` rather than `init(rawValue:)` so a row written
+/// as `loved` still resolves instead of coming back empty.
 enum Rating: String, Codable, CaseIterable, Sendable, Identifiable {
-    case loved
     case liked
-    case fine
-    case no
+    case notLiked = "no"
 
     var id: String { rawValue }
 
     var label: String {
         switch self {
-        case .loved: "Loved"
-        case .liked: "Liked"
-        case .fine:  "Fine"
-        case .no:    "No"
+        case .liked:    "Liked it"
+        case .notLiked: "Didn't like it"
         }
     }
 
     var symbol: String {
         switch self {
-        case .loved: "heart.fill"
-        case .liked: "hand.thumbsup.fill"
-        case .fine:  "hand.raised.fill"
-        case .no:    "hand.thumbsdown.fill"
+        case .liked:    "hand.thumbsup.fill"
+        case .notLiked: "hand.thumbsdown.fill"
         }
     }
 
-    /// Map a free-form model suggestion to a real Rating case; nil if it can't be reasonably mapped.
+    /// Resolve a stored or free-form label to one of the two cases.
+    ///
+    /// Negatives are tested first because "not liked" contains "liked". `fine`
+    /// and `meh` from the old scale return nil rather than being forced onto a
+    /// side the user never picked.
     static func from(loose text: String?) -> Rating? {
         guard let raw = text?.lowercased().trimmingCharacters(in: .whitespaces), !raw.isEmpty else { return nil }
-        if raw.contains("love") { return .loved }
-        if raw.contains("like") || raw.contains("good") { return .liked }
-        if raw.contains("fine") || raw.contains("ok") || raw.contains("meh") { return .fine }
-        if raw.contains("no") || raw.contains("bad") || raw.contains("skip") { return .no }
-        return nil
-    }
-}
-
-enum ReturnIntent: String, Codable, CaseIterable, Sendable, Identifiable {
-    case immediately
-    case whenNearby
-    case ifSuggested
-    case never
-
-    var id: String { rawValue }
-
-    var label: String {
-        switch self {
-        case .immediately: "Immediately"
-        case .whenNearby:  "When nearby"
-        case .ifSuggested: "If suggested"
-        case .never:       "Never"
+        if raw.hasPrefix("no") || raw.contains("dislike") || raw.contains("bad") || raw.contains("skip") {
+            return .notLiked
         }
+        if raw.contains("love") || raw.contains("like") || raw.contains("good") {
+            return .liked
+        }
+        return nil
     }
 }
 
@@ -210,13 +204,19 @@ final class Visit {
     @Attribute(.unique) var id: UUID
     var visitedOn: Date
     var title: String
+    /// Raw `VenueTag` values the user picked. Free-form strings on the model
+    /// rather than an enum array so a tag written before the vocabulary changed
+    /// still round-trips instead of failing to decode.
     var tags: [String]
-    var enrichedDescription: String
-    /// Verbatim transcript from the user's voice note. Never overwritten by enrichment.
-    var transcript: String
-    var topQuote: String
+    /// What the user wrote — or dictated — about the place.
+    ///
+    /// The only body text on an entry. There used to be three fields here: a
+    /// verbatim `transcript`, an `enrichedDescription` the on-device model wrote
+    /// from it, and a `topQuote` it lifted out. With no model in the loop the
+    /// distinction was only ever between the same sentence stored twice, so this
+    /// keeps the column the app already displayed and drops the other two.
+    @Attribute(originalName: "enrichedDescription") var note: String
     var ratingRaw: String?
-    var returnIntentRaw: String?
     var address: String?
     var nameOverride: String?
     var locationSourceRaw: String
@@ -225,14 +225,19 @@ final class Visit {
     /// True if a voice note was recorded for this entry.
     ///
     /// Replaces the old `audioRelativePath`. The audio file is deleted the moment
-    /// transcription finishes — the transcript is the only record kept, and
-    /// nothing about the recording is ever uploaded. This flag exists purely so
-    /// the "Voice notes" profile stat still has something to count.
+    /// transcription finishes — the dictated text in `note` is the only record
+    /// kept, and nothing about the recording is ever uploaded. This flag exists
+    /// purely so the "Voice notes" profile stat still has something to count.
     var hadVoiceNote: Bool = false
-    /// The model's best guess of the raw place name if the venue picker was not used.
+    /// What the user typed in the location field, kept even when the venue
+    /// picker later resolved to something else.
     var rawPlaceGuess: String?
     /// Whether the entry represents an actual visit or a "want to try" bookmark.
     var kindRaw: String = VisitKind.visited.rawValue
+    /// True when this row was created by `WantToTryMirror` from a wishlist save
+    /// rather than typed by the user. Lets unsave remove a mirrored entry even
+    /// after it picked up a friend's photos and note.
+    var wishlistMirror: Bool = false
 
     // MARK: Sync
 
@@ -286,11 +291,8 @@ final class Visit {
         visitedOn: Date = Date(),
         title: String,
         tags: [String] = [],
-        enrichedDescription: String = "",
-        transcript: String = "",
-        topQuote: String = "",
+        note: String = "",
         rating: Rating? = nil,
-        returnIntent: ReturnIntent? = nil,
         address: String? = nil,
         nameOverride: String? = nil,
         locationSource: LocationSource = .manual,
@@ -306,11 +308,8 @@ final class Visit {
         self.visitedOn = visitedOn
         self.title = title
         self.tags = tags
-        self.enrichedDescription = enrichedDescription
-        self.transcript = transcript
-        self.topQuote = topQuote
+        self.note = note
         self.ratingRaw = rating?.rawValue
-        self.returnIntentRaw = returnIntent?.rawValue
         self.address = address
         self.nameOverride = nameOverride
         self.locationSourceRaw = locationSource.rawValue
@@ -347,14 +346,12 @@ final class Visit {
         nextAttemptAt = nil
     }
 
+    /// Read loosely so an entry rated on the old four-point scale still shows a
+    /// verdict. Written back as the current raw value, so it converges the first
+    /// time the user touches the entry.
     var rating: Rating? {
-        get { ratingRaw.flatMap(Rating.init(rawValue:)) }
+        get { Rating.from(loose: ratingRaw) }
         set { ratingRaw = newValue?.rawValue }
-    }
-
-    var returnIntent: ReturnIntent? {
-        get { returnIntentRaw.flatMap(ReturnIntent.init(rawValue:)) }
-        set { returnIntentRaw = newValue?.rawValue }
     }
 
     var locationSource: LocationSource {
@@ -367,6 +364,12 @@ final class Visit {
     /// avatars reshuffles between launches.
     var taggedPeopleOrdered: [VisitTag] {
         taggedPeople.sorted { ($0.order, $0.userID.uuidString) < ($1.order, $1.userID.uuidString) }
+    }
+
+    /// Photos in display order. Same story as `taggedPeopleOrdered` — SwiftData
+    /// relationships are unordered sets.
+    var photosOrdered: [Photo] {
+        photos.sorted { $0.order < $1.order }
     }
 }
 
@@ -526,6 +529,46 @@ final class PendingDeletion {
         requestedAt: Date = Date(),
         storagePaths: [String] = []
     ) {
+        self.visitID = visitID
+        self.ownerUserID = ownerUserID
+        self.requestedAt = requestedAt
+        self.storagePaths = storagePaths
+    }
+}
+
+/// A photo the user removed from an already-synced visit that still has to be
+/// deleted upstream.
+///
+/// Removing a `Photo` from `Visit.photos` locally is not the whole job: the
+/// push pipeline only ever upserts the photos still attached to a visit, it
+/// never deletes rows for ones that aren't — so a `visit_photos` row for a
+/// removed photo would otherwise linger forever, and the next pull (which
+/// merges remote rows by id, not "what's currently local") would recreate it.
+/// Same shape as `PendingDeletion`, scoped to one photo instead of one visit.
+///
+/// Rows are created only for photos that had already synced (`remoteStoragePath
+/// != nil`). A photo removed before it ever uploaded has nothing upstream to
+/// tombstone.
+@Model
+final class PendingPhotoDeletion {
+    @Attribute(.unique) var photoID: UUID
+    var visitID: UUID
+    var ownerUserID: UUID?
+    var requestedAt: Date
+    var attemptCount: Int = 0
+    var nextAttemptAt: Date?
+    /// Storage object paths owned by the deleted photo, so the bucket can be
+    /// cleaned up in the same pass rather than leaking orphans.
+    var storagePaths: [String] = []
+
+    init(
+        photoID: UUID,
+        visitID: UUID,
+        ownerUserID: UUID?,
+        requestedAt: Date = Date(),
+        storagePaths: [String] = []
+    ) {
+        self.photoID = photoID
         self.visitID = visitID
         self.ownerUserID = ownerUserID
         self.requestedAt = requestedAt

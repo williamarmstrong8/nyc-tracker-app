@@ -12,17 +12,19 @@ struct ProfileView: View {
 
     @Environment(AuthManager.self) private var auth
     @Environment(SyncEngine.self) private var sync
-    @Environment(SocialStatsCache.self) private var socialStats
     @Environment(AppRouter.self) private var router
     @Environment(SocialGraph.self) private var graph
-    @Environment(FeedStore.self) private var feed
-    @Environment(FriendVisitCache.self) private var friendVisits
-    @Environment(MapAudienceStore.self) private var audience
-    @Environment(SocialDemoMode.self) private var demo
 
     @State private var showSettings = false
-    @State private var showAddFriends = false
-    @State private var social: OwnSocialStats?
+    @State private var cover: ProfileCover?
+
+    /// One full-screen cover slot so friends and add-friends never compete.
+    private enum ProfileCover: Identifiable {
+        case friends
+        case addFriends
+
+        var id: Self { self }
+    }
 
     @State private var tab: ProfileTab = .activity
     /// Entries friends tagged the user in. Server-backed rather than mirrored,
@@ -32,6 +34,10 @@ struct ProfileView: View {
     @State private var isLoadingTagged = false
     @State private var hasLoadedTagged = false
     @State private var openedTaggedVisit: FriendVisit?
+
+    @State private var isProfileAvatarExpanded = false
+    @State private var isProfileAvatarOverlayOpaque = false
+    @State private var profileAvatarFrame: CGRect = .zero
 
     /// Scoped to the signed-in user, same predicate every other own-visit query uses.
     @Query private var visits: [Visit]
@@ -64,26 +70,36 @@ struct ProfileView: View {
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 28) {
-                    identitySection
-                        .padding(.horizontal, Self.contentMargin)
-                    activitySection
-                    testUsersCard
-                        .padding(.horizontal, Self.contentMargin)
-                    signInFooter
-                        .padding(.horizontal, Self.contentMargin)
+            ZStack {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 28) {
+                        identitySection
+                            .padding(.horizontal, Self.contentMargin)
+                        activitySection
+                        signInFooter
+                            .padding(.horizontal, Self.contentMargin)
+                    }
+                    .padding(.vertical, 16)
                 }
-                .padding(.vertical, 16)
+                .contentMargins(.bottom, BottomNavBar.scrollContentClearance + 16, for: .scrollContent)
+                .background(Color(uiColor: .systemGroupedBackground))
+
+                ProfileAvatarExpandLayer(
+                    isExpanded: $isProfileAvatarExpanded,
+                    isOverlayOpaque: $isProfileAvatarOverlayOpaque,
+                    sourceFrame: profileAvatarFrame,
+                    urlString: profile?.avatarURL
+                ) {
+                    ownAvatarFallback
+                }
             }
-            .background(Color(uiColor: .systemGroupedBackground))
             .navigationTitle("Profile")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button {
                         Haptics.tap()
-                        showAddFriends = true
+                        cover = .addFriends
                     } label: {
                         Label("Add friends", systemImage: "person.badge.plus")
                             .badgeOverlay(graph.incoming.count)
@@ -102,22 +118,34 @@ struct ProfileView: View {
             .navigationDestination(isPresented: $showSettings) {
                 SettingsView()
             }
-            .sheet(isPresented: $showAddFriends) {
-                AddFriendsView()
+            .onChange(of: showSettings) { _, isShowing in
+                router.hidesBottomBar = isShowing
+            }
+            .fullScreenCover(item: $cover) { destination in
+                switch destination {
+                case .friends:
+                    FriendsNavigationStack(userID: userID, showsDismissButton: true)
+                case .addFriends:
+                    AddFriendsView()
+                }
             }
             .sheet(item: $openedTaggedVisit) { visit in
-                FriendVisitDetailSheet(visit: visit)
-            }
-            .task {
-                social = socialStats.cachedOwnStats()
-                social = await socialStats.ownStats()
+                NavigationStack {
+                    FriendVisitWriteUpView(
+                        visit: visit,
+                        onDismiss: { openedTaggedVisit = nil },
+                        onShowOnMap: {
+                            openedTaggedVisit = nil
+                            router.showMap()
+                        },
+                        showsAuthor: false
+                    )
+                    .flatModalToolbarBackground()
+                }
+                .flatModalBackground()
             }
             .task(id: userID) {
                 await loadTaggedVisits()
-            }
-            .onChange(of: demo.epoch) { _, _ in
-                Task { await refreshSocialStats() }
-                Task { await loadTaggedVisits() }
             }
             // A friend can tag the user at any time, and a friendship ending
             // takes tags with it. Both land here on the next sync tick rather
@@ -136,7 +164,11 @@ struct ProfileView: View {
                 .frame(width: 108, height: 108)
                 .clipShape(Circle())
                 .shadow(color: .black.opacity(0.12), radius: 8, x: 0, y: 4)
-                .accessibilityHidden(true)
+                .profileAvatarExpandSource(
+                    isExpanded: $isProfileAvatarExpanded,
+                    isOverlayOpaque: $isProfileAvatarOverlayOpaque,
+                    sourceFrame: $profileAvatarFrame
+                )
 
             VStack(spacing: 3) {
                 Text(profile?.bestName ?? "—")
@@ -147,10 +179,10 @@ struct ProfileView: View {
             }
 
             ProfileHeaderStats(
-                friendCount: social?.friendCount ?? 0,
+                friendCount: graph.friends.count,
                 beenCount: visitedVisits.count,
                 wantToTryCount: wantToTryVisits.count,
-                onFriendsTap: { router.activeTab = .friends },
+                onFriendsTap: { cover = .friends },
                 onBeenTap: { openList(kind: .visited) },
                 onWantToTryTap: { openList(kind: .wantToTry) }
             )
@@ -159,18 +191,28 @@ struct ProfileView: View {
         .padding(.top, 8)
     }
 
-    /// Uploaded avatar when there is one, app logo as the fallback (also used
-    /// while the remote image loads, so the header never jumps).
-    @ViewBuilder
+    /// Uploaded avatar when there is one, the user's own initials as the
+    /// fallback (also used while the remote image loads, so the header never
+    /// jumps — and never dips into the app's logo to stand in for a face).
+    ///
+    /// After the first load the header draws the real picture immediately on
+    /// every subsequent launch: the avatar URL carries the upload's `?v=` stamp,
+    /// so `AvatarCache` can treat it as immutable and keep it until the user
+    /// changes their picture.
     private var avatar: some View {
-        if let urlString = profile?.avatarURL, let url = URL(string: urlString) {
-            AsyncImage(url: url) { image in
-                image.resizable().scaledToFill()
-            } placeholder: {
-                Image("Logo").resizable().scaledToFill()
-            }
+        AvatarImage(urlString: profile?.avatarURL) {
+            ownAvatarFallback
+        }
+    }
+
+    /// Initials once the profile has loaded; a neutral silhouette for the
+    /// sliver of time before it has, since there's no name yet to initial.
+    @ViewBuilder
+    private var ownAvatarFallback: some View {
+        if let profile {
+            PersonInitialsView(person: profile.personSummary)
         } else {
-            Image("Logo").resizable().scaledToFill()
+            PersonUnknownAvatar()
         }
     }
 
@@ -222,6 +264,9 @@ struct ProfileView: View {
                 }
             }
             .padding(.horizontal, 1)
+            .task(id: visitedVisits.count) {
+                prefetchActivityPhotos()
+            }
         }
     }
 
@@ -255,28 +300,28 @@ struct ProfileView: View {
 
     private func taggedCell(for visit: FriendVisit) -> some View {
         let photo = visit.photos.sorted(by: { $0.sortOrder < $1.sortOrder }).first
-        return Group {
-            if let photo {
-                PhotoView(source: .friendPhoto(path: photo.smallestPath), contentMode: .fill)
-            } else {
-                ZStack {
-                    Color(uiColor: .secondarySystemBackground)
-                    Image(systemName: "photo")
-                        .font(.title3)
-                        .foregroundStyle(.tertiary)
+        return Color.clear
+            .aspectRatio(3 / 4, contentMode: .fit)
+            .overlay {
+                if let photo {
+                    PhotoView(source: .friendPhoto(path: photo.smallestPath), contentMode: .fill)
+                } else {
+                    ZStack {
+                        Color(uiColor: .secondarySystemBackground)
+                        Image(systemName: "photo")
+                            .font(.title3)
+                            .foregroundStyle(.tertiary)
+                    }
                 }
             }
-        }
-        .aspectRatio(1, contentMode: .fit)
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .clipped()
-        // Whose entry this is matters more here than on the user's own grid,
-        // where the answer is always "yours".
-        .overlay(alignment: .bottomLeading) {
-            PersonAvatar(person: visit.person, size: 20)
-                .overlay { Circle().strokeBorder(.white.opacity(0.9), lineWidth: 1) }
-                .padding(5)
-        }
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            // Whose entry this is matters more here than on the user's own grid,
+            // where the answer is always "yours".
+            .overlay(alignment: .bottomLeading) {
+                PersonAvatar(person: visit.person, size: 20)
+                    .overlay { Circle().strokeBorder(.white.opacity(0.9), lineWidth: 1) }
+                    .padding(5)
+            }
     }
 
     private var taggedEmptyState: some View {
@@ -310,23 +355,45 @@ struct ProfileView: View {
         taggedVisits = (try? await VisitTagService.taggedVisits(of: userID)) ?? taggedVisits
     }
 
+    /// Warm the photo cache for the top of the activity grid.
+    ///
+    /// Only matters after a reinstall, which is exactly when it matters most: the
+    /// visit rows sync down in one pass and the images do not, so the grid would
+    /// otherwise start downloading a thumbnail at the moment each cell scrolls
+    /// into view and fill in one square at a time under the user's thumb.
+    ///
+    /// Deriving the source rather than reading `remoteThumbPath` off the row is
+    /// deliberate — it keeps the local-file-first preference in one place. A
+    /// photo still on this device resolves to `.relativePath` and is skipped,
+    /// because there is nothing to fetch.
+    private func prefetchActivityPhotos() {
+        let paths = visitedVisits.compactMap { visit -> String? in
+            guard let photo = visit.photos.min(by: { $0.order < $1.order }) else { return nil }
+            guard case .remote(let path) = PhotoView.Source(photo: photo, wantsThumbnail: true) else {
+                return nil
+            }
+            return path
+        }
+        PhotoCache.shared.prefetch(paths)
+    }
+
     private func activityCell(for visit: Visit) -> some View {
         let photo = visit.photos.sorted(by: { $0.order < $1.order }).first
-        return Group {
-            if let photo {
-                PhotoView(source: PhotoView.Source(photo: photo, wantsThumbnail: true), contentMode: .fill)
-            } else {
-                ZStack {
-                    Color(uiColor: .secondarySystemBackground)
-                    Image(systemName: "photo")
-                        .font(.title3)
-                        .foregroundStyle(.tertiary)
+        return Color.clear
+            .aspectRatio(3 / 4, contentMode: .fit)
+            .overlay {
+                if let photo {
+                    PhotoView(source: PhotoView.Source(photo: photo, wantsThumbnail: true), contentMode: .fill)
+                } else {
+                    ZStack {
+                        Color(uiColor: .secondarySystemBackground)
+                        Image(systemName: "photo")
+                            .font(.title3)
+                            .foregroundStyle(.tertiary)
+                    }
                 }
             }
-        }
-        .aspectRatio(1, contentMode: .fit)
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .clipped()
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 
     private var activityEmptyState: some View {
@@ -340,90 +407,6 @@ struct ProfileView: View {
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 28)
-    }
-
-    // MARK: - Test users
-
-    /// Overlay of sample people so friends, explore, and the map can be
-    /// walked without a second real account. Does not write to Supabase and
-    /// does not touch the signed-in user's own visits.
-    private var testUsersCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .center, spacing: 12) {
-                Image(systemName: "flask.fill")
-                    .font(.body.weight(.semibold))
-                    .foregroundStyle(.orange)
-                    .frame(width: 28, height: 28)
-                    .background(Circle().fill(Color.orange.opacity(0.15)))
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Test users")
-                        .font(.subheadline.weight(.semibold))
-                    Text(demo.isEnabled
-                         ? "Sample people are filling friends, explore, and the map."
-                         : "Simulate friends, requests, and explore activity.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-
-                Spacer(minLength: 8)
-
-                Toggle("Test users", isOn: Binding(
-                    get: { demo.isEnabled },
-                    set: { enabled in
-                        Haptics.tap()
-                        applyDemoMode(enabled)
-                    }
-                ))
-                .labelsHidden()
-                .tint(.orange)
-            }
-
-            if demo.isEnabled {
-                Button {
-                    Haptics.tap()
-                    demo.reset()
-                    propagateDemoChange()
-                } label: {
-                    Label("Reset sample data", systemImage: "arrow.counterclockwise")
-                        .font(.caption.weight(.semibold))
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.orange)
-            }
-        }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(Color(uiColor: .secondarySystemGroupedBackground))
-        )
-        .overlay {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .strokeBorder(Color.orange.opacity(demo.isEnabled ? 0.45 : 0), lineWidth: 1)
-        }
-    }
-
-    private func applyDemoMode(_ enabled: Bool) {
-        demo.setEnabled(enabled)
-        if enabled {
-            audience.select(.allFriends)
-        }
-        propagateDemoChange()
-    }
-
-    private func propagateDemoChange() {
-        graph.refresh()
-        feed.refresh()
-        socialStats.invalidateAll()
-        friendVisits.clearResults()
-        social = nil
-        Task { await refreshSocialStats() }
-    }
-
-    private func refreshSocialStats() async {
-        social = await socialStats.ownStats()
     }
 
     // MARK: - Sync footer

@@ -16,7 +16,8 @@ enum LocalStore {
         Visit.self,
         Photo.self,
         VisitTag.self,
-        PendingDeletion.self
+        PendingDeletion.self,
+        PendingPhotoDeletion.self
     ]
 
     /// One shared, disk-backed container for the app.
@@ -50,7 +51,7 @@ enum LocalStore {
     /// Cross-user scoping lives here, in one expression, on purpose. Two accounts
     /// on one device share a store file, and the failure mode of getting this
     /// wrong is not subtle — user B opens the app and sees user A's restaurants,
-    /// transcripts and photos. Spreading the check across seven `@Query`
+    /// notes and photos. Spreading the check across seven `@Query`
     /// declarations means seven chances to forget it and no single place to audit.
     ///
     /// `ownerUserID == nil` rows are deliberately excluded: those are pre-auth
@@ -149,49 +150,6 @@ struct VisitRepository {
         try? context.save()
     }
 
-    /// Save a want-to-try straight from a venue the user found in Apple Maps.
-    ///
-    /// The capture flow's own want-to-try path (`WantToTryView`) has to *guess*
-    /// the venue from a typed name, photos, or OCR off a storefront sign. This
-    /// one starts from an `MKMapItem` the user picked by hand, so there is
-    /// nothing to infer: the name, coordinate, category and POI id all come
-    /// from MapKit, and the entry is complete the moment it is created.
-    ///
-    /// Returns the new visit so the caller can pan the map to it — or the
-    /// existing one, if this venue is already on the list. Saving the same place
-    /// twice puts two pins at identical coordinates, which reads as a bug rather
-    /// than as emphasis.
-    @discardableResult
-    func insertWantToTry(
-        from candidate: VenueCandidate,
-        neighborhood: String?
-    ) -> Visit {
-        if let existing = existingWantToTry(matching: candidate) {
-            return existing
-        }
-
-        let place = Place(
-            name: candidate.name,
-            category: candidate.category,
-            neighborhood: neighborhood ?? "NYC",
-            lat: candidate.coordinate.latitude,
-            lng: candidate.coordinate.longitude,
-            externalPOIId: candidate.externalPOIId
-        )
-
-        let visit = Visit(
-            title: candidate.name,
-            address: candidate.address,
-            // `.manual` rather than `.device`: the coordinate came from a venue
-            // the user chose, not from where the phone happened to be.
-            locationSource: .manual,
-            kind: .wantToTry
-        )
-
-        insert(place: place, visit: visit, photos: [])
-        return visit
-    }
-
     /// Persist an edit to an existing visit and re-queue it for upload.
     ///
     /// The one method every edit screen should call instead of `context.save()`.
@@ -208,7 +166,11 @@ struct VisitRepository {
     /// `existingVisitedVisit` needs. Both sides of this comparison came from a
     /// MapKit result the user tapped, so either the identifiers match or these
     /// genuinely are two different places.
-    private func existingWantToTry(matching candidate: VenueCandidate) -> Visit? {
+    ///
+    /// Not private: `WantToTryView` checks this before inserting a want-to-try
+    /// that started from a map POI, so tapping the same pin twice doesn't drop
+    /// a second pin on top of the first.
+    func existingWantToTry(matching candidate: VenueCandidate) -> Visit? {
         guard let poiID = candidate.externalPOIId, !poiID.isEmpty else { return nil }
 
         let places: [Place]
@@ -266,17 +228,14 @@ struct VisitRepository {
     }
 
     /// Fold a repeat visit into an existing entry: new photos append after the existing ones, the
-    /// new transcript is appended (date-stamped) rather than overwriting the original, and tags /
-    /// description / rating merge in additively.
+    /// new note is appended date-stamped rather than overwriting the original, and tags merge in
+    /// additively.
     func appendVisitOccasion(
         to visit: Visit,
         photos: [Photo],
-        transcript: String,
-        description: String,
+        note: String,
         tags: [String],
-        topQuote: String,
         rating: Rating?,
-        returnIntent: ReturnIntent?,
         visitedOn: Date,
         tagged: [PersonSummary] = []
     ) {
@@ -287,24 +246,20 @@ struct VisitRepository {
             context.insert(photo)
         }
 
-        if !transcript.isEmpty {
+        // Date-stamped and appended, never replaced: the first occasion's note is
+        // still true about the first occasion.
+        if !note.isEmpty, note != visit.note {
             let stamp = visitedOn.formatted(.dateTime.month(.abbreviated).day().year())
-            let entry = "— \(stamp) —\n\(transcript)"
-            visit.transcript = visit.transcript.isEmpty ? entry : "\(visit.transcript)\n\n\(entry)"
-        }
-
-        if !description.isEmpty, description != visit.enrichedDescription {
-            visit.enrichedDescription = visit.enrichedDescription.isEmpty
-                ? description
-                : "\(visit.enrichedDescription)\n\n\(description)"
+            let entry = "— \(stamp) —\n\(note)"
+            visit.note = visit.note.isEmpty ? entry : "\(visit.note)\n\n\(entry)"
         }
 
         if !tags.isEmpty {
-            visit.tags = Array(Set(visit.tags).union(tags)).sorted()
+            visit.tags = VenueTag.sorted(Array(Set(visit.tags).union(tags)))
         }
-        if !topQuote.isEmpty { visit.topQuote = topQuote }
+        // The verdict is the one field that replaces rather than merges — the
+        // latest visit is the one that counts.
         if let rating { visit.rating = rating }
-        if let returnIntent { visit.returnIntent = returnIntent }
         visit.visitedOn = max(visit.visitedOn, visitedOn)
 
         // Additive, like tags and description: someone tagged on the first
@@ -319,6 +274,73 @@ struct VisitRepository {
 
         // The merged entry is new content the cloud hasn't seen, including the
         // freshly attached photos — which still need their objects uploaded.
+        visit.markDirty()
+        try? context.save()
+    }
+
+    // MARK: - Photo edits
+
+    /// Append newly-picked photos to a persisted visit, ordered after
+    /// whatever is already there, then re-queue the visit for upload.
+    func addPhotos(_ photos: [Photo], to visit: Visit) {
+        let startOrder = (visit.photos.map(\.order).max() ?? -1) + 1
+        for (offset, photo) in photos.enumerated() {
+            photo.order = startOrder + offset
+            photo.visit = visit
+            context.insert(photo)
+        }
+        visit.markDirty()
+        try? context.save()
+    }
+
+    /// Reorder a persisted visit's photos in memory, live as the user drags —
+    /// the same feel as the capture flow's array-backed photo strip, where
+    /// dragging just reorders a plain `[PhotosPickerItem]` and nothing hits
+    /// disk until the surrounding form is submitted.
+    ///
+    /// No `markDirty()` or `save()` here on purpose: `Photo` is a live
+    /// SwiftData object, so the new order is visible immediately without
+    /// either, and calling `context.save()` on every drag step — potentially
+    /// several times per drag as the finger crosses each neighbor — is disk
+    /// I/O the smoothness of a drag gesture shouldn't be paying for. The edit
+    /// screen's own Save button (`saveEdit`) is what actually commits it, the
+    /// same moment it commits every other field on the form; Cancel's
+    /// `context.rollback()` un-does it the same way it un-does a title edit.
+    func reorderPhotos(in visit: Visit, fromOffsets: IndexSet, toOffset: Int) {
+        var ordered = visit.photosOrdered
+        ordered.move(fromOffsets: fromOffsets, toOffset: toOffset)
+        for (index, photo) in ordered.enumerated() {
+            photo.order = index
+        }
+    }
+
+    /// Remove one photo from a persisted visit: delete its on-disk copies,
+    /// queue an upstream tombstone if it had already synced, close the gap in
+    /// the remaining order, and re-queue the visit itself.
+    func deletePhoto(_ photo: Photo, from visit: Visit) {
+        if let path = photo.relativePath {
+            FileStorage.shred(at: FileStorage.url(forRelativePath: path))
+        }
+        if let thumb = photo.thumbRelativePath {
+            FileStorage.shred(at: FileStorage.url(forRelativePath: thumb))
+        }
+
+        // Only a photo that made it to the cloud has a row there to clean up.
+        if let storagePath = photo.remoteStoragePath {
+            context.insert(PendingPhotoDeletion(
+                photoID: photo.id,
+                visitID: visit.id,
+                ownerUserID: visit.ownerUserID ?? userID,
+                storagePaths: [storagePath, photo.remoteThumbPath].compactMap { $0 }
+            ))
+        }
+
+        let remaining = visit.photosOrdered.filter { $0.id != photo.id }
+        for (index, remainingPhoto) in remaining.enumerated() {
+            remainingPhoto.order = index
+        }
+
+        context.delete(photo)
         visit.markDirty()
         try? context.save()
     }

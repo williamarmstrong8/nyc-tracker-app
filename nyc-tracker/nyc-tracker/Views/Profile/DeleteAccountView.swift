@@ -38,7 +38,7 @@ struct DeleteAccountView: View {
 
                         VStack(alignment: .leading, spacing: 6) {
                             bullet("Your profile and username")
-                            bullet("Every visit, transcript, and write-up")
+                            bullet("Every visit, note, and tag")
                             bullet("All uploaded photos")
                             bullet("Your friendships and recommendations")
                         }

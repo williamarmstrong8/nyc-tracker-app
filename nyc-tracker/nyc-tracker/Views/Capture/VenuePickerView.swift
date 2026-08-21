@@ -6,7 +6,7 @@ import CoreLocation
 /// flow (`WantToTryView`).
 ///
 /// Shows the top 3 candidates + a "search manually" fallback. Tapping any candidate immediately
-/// invokes `onSelect`; the caller advances to its own confirm/edit screen.
+/// invokes `onSelect`; the caller then persists (capture) or saves (want-to-try).
 ///
 /// The caller owns the NavigationStack context. Present this view inside a `NavigationStack` (a
 /// `.sheet` wrapper works well).
@@ -16,7 +16,9 @@ struct VenuePickerView: View {
     /// What the user typed as the name, if anything. Pre-fills the pin-drop
     /// screen so they don't type it twice.
     var typedName: String? = nil
-    /// Called with the confirmed candidate (or nil to explicitly keep the user's typed name).
+    /// Called with the confirmed candidate. Optional only because `DropPinView`'s
+    /// callback plumbs through the same closure type; every path here now
+    /// produces a real candidate.
     let onSelect: (VenueCandidate?) -> Void
 
     private var topCandidates: [VenueCandidate] {
@@ -61,19 +63,13 @@ struct VenuePickerView: View {
                         onSelect(candidate)
                     }
                 } label: {
-                    Label("Drop a pin on the map", systemImage: "mappin.and.ellipse")
-                }
-                Button {
-                    Haptics.tap()
-                    onSelect(nil)
-                } label: {
-                    Label("None of these — keep my name", systemImage: "square.and.pencil")
+                    Label("None of these — write my own name", systemImage: "square.and.pencil")
                 }
             } footer: {
                 // Named rather than left to be discovered: this is the only path
                 // for a venue MapKit does not have, and "search harder" is the
                 // wrong advice for a food truck.
-                Text("Somewhere that isn't on the map — a truck, a stall, a pop-up — can be pinned by hand.")
+                Text("Somewhere that isn't on the map — a truck, a stall, a pop-up — can be named and pinned by hand.")
             }
         }
         .listStyle(.insetGrouped)

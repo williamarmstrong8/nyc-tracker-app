@@ -34,6 +34,35 @@ struct PhotoView: View {
             return .remote(path: path)
         }
 
+        /// Stable identity for `ImageMemoryCache`, or nil for a source that has
+        /// nothing to cache.
+        ///
+        /// `.uiImage` and `.asset` are already decoded (one is handed in, the
+        /// other is an asset-catalog image UIKit caches itself), and `.sfSymbol`
+        /// draws a glyph. Everything else costs a file read, a decode, or a round
+        /// trip, and gets a key.
+        ///
+        /// The prefixes matter: a relative path and a storage path can collide as
+        /// bare strings, and a thumbnail and its full-size original are different
+        /// images at different paths that must not share an entry.
+        var cacheKey: String? {
+            switch self {
+            case .sfSymbol, .uiImage, .asset:
+                return nil
+            case .relativePath(let path):
+                return "file:\(path)"
+            case .phAssetIdentifier(let id):
+                return "asset:\(id)"
+            case .remote(let path):
+                return "remote:\(path)"
+            case .pickerItem(let item):
+                // Non-nil because the picker is built with `photoLibrary: .shared()`.
+                // Without that it would be nil and this source stays uncached,
+                // which is the old behaviour and merely slower.
+                return item.itemIdentifier.map { "picker:\($0)" }
+            }
+        }
+
         /// Build the best source for a persisted `Photo` row.
         ///
         /// The order is a preference ranking, cheapest and most reliable first:
@@ -87,7 +116,33 @@ struct PhotoView: View {
     let source: Source
     var contentMode: ContentMode = .fill
 
+    /// Seeded synchronously from `ImageMemoryCache` so an image that has already
+    /// been decoded is drawn in this view's very first frame.
+    ///
+    /// This is the difference between a photo grid that scrolls and one that
+    /// blinks: `LazyVGrid` and `List` build a brand-new `PhotoView` every time a
+    /// cell is recycled, and a `@State` starting at nil means every one of those
+    /// shows the placeholder until an async hop completes — for a photo the app
+    /// decoded a second ago.
     @State private var loaded: UIImage?
+
+    /// Which source `loaded` came from.
+    ///
+    /// SwiftUI reuses a view's identity — and therefore its `@State` — when only
+    /// the source changes, which is exactly what a recycled grid cell and a
+    /// swiped carousel page both do. Without this, "I already have an image"
+    /// cannot be told apart from "I already have *this* image", and the view
+    /// keeps drawing the previous photo.
+    @State private var loadedKey: String?
+
+    init(source: Source, contentMode: ContentMode = .fill) {
+        self.source = source
+        self.contentMode = contentMode
+        let key = source.cacheKey
+        let cached = key.flatMap { ImageMemoryCache.shared.image(forKey: $0) }
+        _loaded = State(initialValue: cached)
+        _loadedKey = State(initialValue: cached == nil ? nil : key)
+    }
 
     var body: some View {
         Group {
@@ -112,37 +167,82 @@ struct PhotoView: View {
                     .aspectRatio(contentMode: contentMode)
             }
         }
+        // `.fill` otherwise sizes the image to its own aspect, so a landscape
+        // photo is wider than a square / 3:4 tile and paints into its neighbors.
+        .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
+        .clipped()
+        .contentShape(Rectangle())
         .task(id: source) {
             await loadIfNeeded()
         }
     }
 
     private func loadIfNeeded() async {
+        let key = source.cacheKey
+
+        if let key {
+            // Already showing this exact image — either `init` found it in the
+            // cache, or a previous run of this loaded it. Nothing to do, and no
+            // placeholder was ever shown.
+            if loadedKey == key { return }
+
+            // A different source than the one on screen. Drop the old image so a
+            // recycled cell shows its placeholder rather than the last cell's
+            // photo, then take the cached decode if there is one.
+            if loaded != nil { loaded = nil }
+            if let cached = ImageMemoryCache.shared.image(forKey: key) {
+                loaded = cached
+                loadedKey = key
+                return
+            }
+        }
+
         switch source {
         case .pickerItem(let item):
-            if let data = try? await item.loadTransferable(type: Data.self),
-               let image = UIImage(data: data) {
-                self.loaded = image
+            // Cacheable only when the picker was built with
+            // `photoLibrary: .shared()`, which is what makes `itemIdentifier`
+            // non-nil. Without it the decode still moves off the main actor;
+            // it just isn't kept.
+            if let data = try? await item.loadTransferable(type: Data.self) {
+                if let key {
+                    self.loaded = await ImageMemoryCache.shared.decodedImage(from: data, key: key)
+                } else {
+                    self.loaded = UIImage(data: data)
+                }
             }
         case .relativePath(let path):
-            let url = FileStorage.url(forRelativePath: path)
-            if let data = try? Data(contentsOf: url), let image = UIImage(data: data) {
-                self.loaded = image
-            }
+            // The read and the JPEG decode both used to happen right here on the
+            // main actor, on every cell recycle. Both now happen off it, once.
+            self.loaded = await ImageMemoryCache.shared.decodedImage(
+                contentsOf: FileStorage.url(forRelativePath: path),
+                key: key ?? "file:\(path)"
+            )
         case .phAssetIdentifier(let id):
-            self.loaded = await Self.loadFromPhotoLibrary(identifier: id)
+            // No `Data` to hand to the cache — `PHImageManager` returns a
+            // rendered `UIImage` — so this inserts the result directly instead of
+            // going through the decode helper.
+            let image = await Self.loadFromPhotoLibrary(identifier: id)
+            if let image, let key {
+                ImageMemoryCache.shared.insert(image, forKey: key)
+            }
+            self.loaded = image
         case .remote(let path):
             // Lazy by design: this runs when the view is about to draw, not
             // during the pull. A fresh install therefore shows its map and list
             // immediately and fills images in as they scroll into view.
-            if let url = await PhotoCache.shared.file(for: path),
-               let data = try? Data(contentsOf: url),
-               let image = UIImage(data: data) {
-                self.loaded = image
-            }
+            guard let url = await PhotoCache.shared.file(for: path) else { return }
+            self.loaded = await ImageMemoryCache.shared.decodedImage(
+                contentsOf: url,
+                key: key ?? "remote:\(path)"
+            )
         default:
             break
         }
+
+        // Record what is on screen only if something actually landed. A failed
+        // load leaves this nil so a later appearance retries rather than
+        // treating the placeholder as the final answer.
+        if loaded != nil { loadedKey = key }
     }
 
     private static func loadFromPhotoLibrary(identifier: String) async -> UIImage? {

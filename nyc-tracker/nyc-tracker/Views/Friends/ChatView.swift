@@ -1,17 +1,6 @@
 import SwiftUI
 import SwiftData
 
-/// Route to a chat.
-///
-/// A wrapper rather than pushing `PersonSummary` directly, because that value
-/// already means "show me this person's profile" — it is what a search result
-/// and a request row push, and both of those are people you are not messaging
-/// yet. Two meanings for one route type would send Add-friends taps into a
-/// conversation with a stranger.
-struct ChatRoute: Hashable {
-    let person: PersonSummary
-}
-
 /// A direct-message thread with one friend.
 ///
 /// The friends list used to open a profile; it opens this instead. The profile
@@ -21,11 +10,12 @@ struct ChatRoute: Hashable {
 ///
 /// ## A text field, with a place as an optional attachment
 ///
-/// The composer is an ordinary text field. A pin button beside it opens the
-/// picker; picking a place attaches it above the field as a chip instead of
-/// sending immediately, so the note and the venue travel together in one
-/// message the way `send_message` expects. A message needs no place at all —
-/// this is still a chat, not only a place-sharing tool.
+/// The composer is an ordinary text field. A "Send a place" pill floats above
+/// it as its own glass surface and opens the picker; picking a place swaps
+/// that pill for a chip showing the pick instead of sending immediately, so
+/// the note and the venue travel together in one message the way
+/// `send_message` expects. A message needs no place at all — this is still a
+/// chat, not only a place-sharing tool.
 struct ChatView: View {
     let userID: UUID
     let person: PersonSummary
@@ -33,8 +23,10 @@ struct ChatView: View {
     @Environment(ChatStore.self) private var chat
     @Environment(FriendVisitCache.self) private var friendCache
     @Environment(FeedStore.self) private var feed
-    @Environment(SocialDemoMode.self) private var demo
     @Environment(AppRouter.self) private var router
+    // Forwarded into the write-up sheet so unsaving / deleting a saved
+    // want-to-try opened from a chat keeps the wishlist row in step.
+    @Environment(WishlistStore.self) private var wishlist: WishlistStore?
     @Environment(\.modelContext) private var modelContext
 
     @State private var conversationID: UUID?
@@ -111,13 +103,12 @@ struct ChatView: View {
         .background(Color(uiColor: .systemGroupedBackground))
         .navigationTitle(person.bestName)
         .navigationBarTitleDisplayMode(.inline)
-        .onAppear { router.hidesBottomBar = true }
         .toolbar {
             ToolbarItem(placement: .principal) {
                 // The one route to the profile. A link rather than a menu item
                 // because tapping someone's name and photo is already how you
                 // expect to get to them.
-                NavigationLink(value: person) {
+                NavigationLink(value: FriendsRoute.profile(person)) {
                     HStack(spacing: 8) {
                         PersonAvatar(person: person, size: 30)
                         Text(person.bestName)
@@ -134,10 +125,7 @@ struct ChatView: View {
             composer
         }
         .task(id: person.id) { await open() }
-        .onDisappear {
-            chat.setActiveConversation(nil)
-            router.hidesBottomBar = false
-        }
+        .onDisappear { chat.setActiveConversation(nil) }
         .sheet(isPresented: $showPicker) {
             SharePlacePicker(userID: userID, recipient: person) { picked in
                 attachedPlace = picked
@@ -146,6 +134,7 @@ struct ChatView: View {
         }
         .sheet(item: $openedMessagePlace) { opened in
             messagePlaceSheet(opened)
+                .environment(wishlist)
         }
     }
 
@@ -163,13 +152,12 @@ struct ChatView: View {
                     onDismiss: { openedMessagePlace = nil },
                     onShowOnMap: {
                         openedMessagePlace = nil
-                        router.showMap()
+                        router.showMyMap()
                     }
                 )
-                .toolbarBackground(Color(uiColor: .systemBackground), for: .navigationBar)
-                .toolbarBackgroundVisibility(.visible, for: .navigationBar)
+                .flatModalToolbarBackground()
             }
-            .presentationBackground(Color(uiColor: .systemBackground))
+            .flatModalBackground()
 
         case .friendVisit(let visit):
             NavigationStack {
@@ -181,10 +169,9 @@ struct ChatView: View {
                         router.showMap()
                     }
                 )
-                .toolbarBackground(Color(uiColor: .systemBackground), for: .navigationBar)
-                .toolbarBackgroundVisibility(.visible, for: .navigationBar)
+                .flatModalToolbarBackground()
             }
-            .presentationBackground(Color(uiColor: .systemBackground))
+            .flatModalBackground()
         }
     }
 
@@ -260,6 +247,10 @@ struct ChatView: View {
             }
             .defaultScrollAnchor(.bottom)
             .defaultScrollAnchor(.bottom, for: .sizeChanges)
+            // `.interactively`, not `.immediately`: this tracks the keyboard
+            // to the drag instead of snapping it away the instant a scroll
+            // begins, which is what makes it read as a slide rather than a cut.
+            .scrollDismissesKeyboard(.interactively)
             // Simultaneous, not exclusive: the vertical scroll has to keep
             // working, and the guard below hands any mostly-vertical drag back
             // to it untouched. `@GestureState` is what snaps the thread home on
@@ -372,30 +363,57 @@ struct ChatView: View {
         !trimmedMessage.isEmpty && conversationID != nil && !isSending
     }
 
-    /// One card, not several. The attached place and the send button both live
-    /// inside the same glass surface as the text field — an attachment sitting
-    /// in its own card above, or a send button floating beside it, would read
-    /// as two controls doing one job. This is the whole composer: a single
-    /// `glassEffect` surface, so there is no glass-on-glass to worry about
-    /// even though it contains three interactive pieces.
+    /// Two glass surfaces, not one. "Send a place" (or the place waiting to go
+    /// out) is its own pill above the text field rather than a button buried
+    /// inside it, so attaching a place reads as a deliberate, separate action
+    /// — closer to how the picker itself feels — instead of one more control
+    /// crowding the message row. Grouped in a `GlassEffectContainer` because
+    /// the two surfaces sit right on top of each other and need to morph
+    /// together rather than render as two flat, unrelated panes.
     private var composer: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            if let attachedPlace {
-                attachmentRow(attachedPlace)
-                Divider()
-                    .padding(.horizontal, 14)
+        GlassEffectContainer(spacing: 8) {
+            VStack(alignment: .leading, spacing: 8) {
+                if let attachedPlace {
+                    attachmentChip(attachedPlace)
+                } else {
+                    sendPlaceButton
+                }
+                composerInputRow
+                    .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 24, style: .continuous))
             }
-            composerInputRow
         }
-        .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 24, style: .continuous))
         .padding(.horizontal, 16)
         .padding(.top, 8)
         .padding(.bottom, 10)
     }
 
-    /// The place waiting to go out with the next message, as the top of the
-    /// same card the text field sits in rather than a floating chip above it.
-    private func attachmentRow(_ picked: PickedChatPlace) -> some View {
+    /// The pill that opens the place picker. Its own glass surface, sized to
+    /// its label rather than stretched full-width, so it reads as a single
+    /// tappable action and not a second text field.
+    private var sendPlaceButton: some View {
+        Button {
+            Haptics.tap()
+            showPicker = true
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "mappin.and.ellipse")
+                    .font(.system(size: 13, weight: .semibold))
+                Text("Send a place")
+                    .font(.subheadline.weight(.medium))
+            }
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 9)
+        }
+        .buttonStyle(.plain)
+        .disabled(conversationID == nil)
+        .glassEffect(.regular.interactive(), in: .capsule)
+        .accessibilityLabel("Send a place")
+    }
+
+    /// The place waiting to go out with the next message, standing in for
+    /// `sendPlaceButton` in the same slot above the text field.
+    private func attachmentChip(_ picked: PickedChatPlace) -> some View {
         HStack(spacing: 10) {
             Color.clear
                 .frame(width: 40, height: 40)
@@ -438,31 +456,14 @@ struct ChatView: View {
             .accessibilityLabel("Remove attached place")
         }
         .padding(.horizontal, 14)
-        .padding(.top, 10)
-        .padding(.bottom, 8)
+        .padding(.vertical, 8)
+        .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 18, style: .continuous))
     }
 
-    /// The pin, the field, and send — one row, plain buttons throughout
-    /// because the card around them is already the glass surface.
+    /// The field and send button — one row, a plain button throughout
+    /// because the card around it is already the glass surface.
     private var composerInputRow: some View {
         HStack(alignment: .bottom, spacing: 8) {
-            Button {
-                Haptics.tap()
-                showPicker = true
-            } label: {
-                Image(systemName: "mappin.and.ellipse")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 30, height: 30)
-                    .background {
-                        Circle()
-                            .fill(Color(uiColor: .tertiarySystemFill))
-                    }
-            }
-            .buttonStyle(.plain)
-            .disabled(conversationID == nil)
-            .accessibilityLabel("Attach a place")
-
             TextField(
                 attachedPlace == nil ? "Message" : "Say something about it…",
                 text: $messageText,
@@ -518,7 +519,7 @@ struct ChatView: View {
 
     /// Resolves the tapped card to one specific entry — never the aggregated
     /// place sheet — and opens it in whichever style matches its author: your
-    /// own message opens your own write-up, theirs opens `FriendVisitDetailSheet`.
+    /// own message opens `ReadOnlyWriteUpView`, theirs opens `FriendVisitWriteUpView`.
     private func openMessagePlace(_ message: ChatMessage) {
         guard let place = message.place else { return }
 
@@ -533,8 +534,7 @@ struct ChatView: View {
             let known = SocialPlaceVisits.collected(
                 placeID: place.id,
                 cache: friendCache,
-                feed: feed,
-                demo: demo
+                feed: feed
             )
             if let match = known.first(where: { $0.id == visitID }) {
                 openedMessagePlace = .friendVisit(match)
@@ -544,17 +544,14 @@ struct ChatView: View {
 
         // No local write-up and nothing already cached — fall back to what the
         // message itself carries. Enough for the card's fields even if the
-        // full summary/quote/transcript weren't joined onto this row.
+        // author's note wasn't joined onto this row.
         openedMessagePlace = .friendVisit(FriendVisit(
             visitID: message.visitID ?? UUID(),
             visitedAt: message.createdAt,
             title: message.visitTitle,
             summary: nil,
-            transcript: nil,
-            topQuote: nil,
             tags: message.visitTags,
             ratingLabel: message.ratingLabel,
-            returnIntent: nil,
             kind: "visited",
             placeID: place.id,
             placeName: place.name,
@@ -636,8 +633,7 @@ struct ChatView: View {
             in: conversationID,
             body: body,
             place: picked?.placeID,
-            visit: picked?.visitID,
-            preview: picked?.preview
+            visit: picked?.visitID
         )
 
         if sent {
@@ -683,7 +679,9 @@ private struct ChatMessageRow: View {
         message.photos
             .sorted { $0.sortOrder < $1.sortOrder }
             .first
-            .map { PhotoView.Source.friendPhoto(path: $0.smallestPath) }
+            // Full image, not `smallestPath`: the card is 240pt wide (~720px on
+            // 3×), and the ~400px thumb upscales soft. List rows still use the thumb.
+            .map { PhotoView.Source.friendPhoto(path: $0.storagePath) }
     }
 
     var body: some View {

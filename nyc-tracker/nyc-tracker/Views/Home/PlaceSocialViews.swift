@@ -96,189 +96,90 @@ struct PlaceSocialSection: View {
 
 /// Friends at this place, on the user's own visit write-up.
 ///
-/// Compact by default — a count and avatars — with comments behind a tap so the
-/// write-up stays about the visit the user opened.
+/// One row per friend who has been — avatar and their note — with the first
+/// three shown and a See more control when there are more. No count summary
+/// and no toggle: friends' notes live here, not as a duplicated body above.
 struct VisitFriendsSection: View {
     let placeID: UUID
     var latitude: Double?
     var longitude: Double?
 
+    private static let previewLimit = 3
+
     @Environment(SocialStatsCache.self) private var stats
     @Environment(FriendVisitCache.self) private var friendCache
     @Environment(FeedStore.self) private var feed
-    @Environment(SocialDemoMode.self) private var demo
     @Environment(AuthManager.self) private var auth
     @Environment(SocialGraph.self) private var graph
 
-    @State private var social: PlaceSocial?
+    @State private var entries: [FriendPlaceNote] = []
     @State private var isLoading = false
-    @State private var showComments = false
-    @State private var comments: [FriendVisit] = []
-    @State private var isLoadingComments = false
+    @State private var showAll = false
 
-    private var hasAnythingToShow: Bool {
-        guard let social else { return false }
-        return social.friendPlaceCount > 0
-            || social.recommenders.contains { !($0.message ?? "").isEmpty }
+    private var visibleEntries: [FriendPlaceNote] {
+        showAll ? entries : Array(entries.prefix(Self.previewLimit))
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            if let social, hasAnythingToShow {
-                if social.friendPlaceCount > 0 {
-                    friendsRow(social)
+        VStack(alignment: .leading, spacing: 10) {
+            if !entries.isEmpty {
+                ForEach(visibleEntries) { entry in
+                    friendNoteRow(entry)
                 }
-                commentsToggle
-                if showComments {
-                    commentsBlock(social)
+                if entries.count > Self.previewLimit && !showAll {
+                    Button {
+                        Haptics.tap()
+                        withAnimation(.snappy) { showAll = true }
+                    } label: {
+                        Text("See more")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.top, 2)
                 }
             } else if isLoading {
                 ProgressView().controlSize(.small)
             }
         }
         .task(id: placeID) {
-            social = stats.cachedPlaceSocial(placeID)
-            guard social == nil else { return }
-            isLoading = true
-            social = await stats.placeSocial(placeID)
-            isLoading = false
+            await load()
         }
     }
 
-    private func friendsRow(_ social: PlaceSocial) -> some View {
-        HStack(spacing: 10) {
-            HStack(spacing: -8) {
-                ForEach(social.friends.prefix(4)) { visitor in
-                    PersonAvatar(person: visitor.person, size: 28, showsPaletteRing: true)
-                        .overlay(
-                            Circle().stroke(
-                                Color(uiColor: .systemBackground),
-                                lineWidth: 2
-                            )
-                        )
+    private func friendNoteRow(_ entry: FriendPlaceNote) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            PersonAvatar(person: entry.person, size: 32)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(entry.person.bestName)
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(1)
+                if let body = entry.body, !body.isEmpty {
+                    Text(body)
+                        .font(.subheadline)
+                        .foregroundStyle(.primary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            Text("\(pluralized(social.friendPlaceCount, "friend")) \(social.friendPlaceCount == 1 ? "has" : "have") been here")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
             Spacer(minLength: 0)
         }
     }
 
-    private var commentsToggle: some View {
-        Button {
-            Haptics.tap()
-            withAnimation(.snappy) { showComments.toggle() }
-            if showComments { Task { await loadComments() } }
-        } label: {
-            HStack(spacing: 4) {
-                Text(showComments ? "Hide comments" : "See what they said")
-                Image(systemName: "chevron.down")
-                    .rotationEffect(.degrees(showComments ? 0 : -90))
-            }
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(.secondary)
-        }
-        .buttonStyle(.plain)
-    }
+    private func load() async {
+        isLoading = entries.isEmpty
+        defer { isLoading = false }
 
-    @ViewBuilder
-    private func commentsBlock(_ social: PlaceSocial) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            ForEach(social.recommenders) { recommender in
-                if let message = recommender.message, !message.isEmpty {
-                    commentCard(
-                        person: recommender.person,
-                        date: recommender.createdAt,
-                        rating: nil,
-                        body: "\u{201C}\(message)\u{201D}"
-                    )
-                }
-            }
+        async let socialTask = stats.placeSocial(placeID)
+        let visits = await loadFriendVisits()
+        let social = await socialTask
 
-            if isLoadingComments && comments.isEmpty {
-                ProgressView().controlSize(.small)
-                    .padding(.vertical, 4)
-            }
-
-            ForEach(comments) { visit in
-                commentCard(
-                    person: visit.person,
-                    date: visit.visitedAt,
-                    rating: visit.rating,
-                    body: commentBody(for: visit)
-                )
-            }
-
-            if !isLoadingComments,
-               comments.isEmpty,
-               social.recommenders.allSatisfy({ ($0.message ?? "").isEmpty }) {
-                Text("No notes from friends yet.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    private func commentCard(
-        person: PersonSummary,
-        date: Date?,
-        rating: Rating?,
-        body: String?
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                PersonAvatar(person: person, size: 28, showsPaletteRing: true)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(person.bestName)
-                        .font(.subheadline.weight(.semibold))
-                        .lineLimit(1)
-                    if let date {
-                        Text(date.formatted(date: .abbreviated, time: .omitted))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                Spacer(minLength: 0)
-                if let rating {
-                    Image(systemName: rating.symbol)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .accessibilityLabel(rating.label)
-                }
-            }
-            if let body, !body.isEmpty {
-                Text(body)
-                    .font(.subheadline)
-                    .foregroundStyle(.primary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-        .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Color(uiColor: .secondarySystemGroupedBackground))
+        entries = Self.mergedEntries(
+            visits: visits,
+            visitors: social?.friends ?? []
         )
     }
 
-    private func commentBody(for visit: FriendVisit) -> String? {
-        if let summary = visit.summary?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !summary.isEmpty {
-            return summary
-        }
-        if let quote = visit.topQuote?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !quote.isEmpty {
-            return "\u{201C}\(quote)\u{201D}"
-        }
-        return nil
-    }
-
-    private func loadComments() async {
-        guard comments.isEmpty else { return }
-        isLoadingComments = true
-        defer { isLoadingComments = false }
-
+    private func loadFriendVisits() async -> [FriendVisit] {
         var seed: [FriendVisit] = []
         let friendIDs = graph.friendIDs
         if let latitude, let longitude, !friendIDs.isEmpty {
@@ -296,14 +197,79 @@ struct VisitFriendsSection: View {
         }
 
         let ownID = auth.state.profile?.id
-        comments = SocialPlaceVisits.collected(
+        return SocialPlaceVisits.collected(
             placeID: placeID,
             seed: seed,
             cache: friendCache,
-            feed: feed,
-            demo: demo
+            feed: feed
         ).filter { $0.userID != ownID }
     }
+
+    /// One row per friend who has been. Prefer their visit note when we have
+    /// one; otherwise fall back to a bare avatar + name from `place_social`.
+    private static func mergedEntries(
+        visits: [FriendVisit],
+        visitors: [PlaceVisitor]
+    ) -> [FriendPlaceNote] {
+        var byUser: [UUID: FriendPlaceNote] = [:]
+        var order: [UUID] = []
+
+        func upsert(_ note: FriendPlaceNote, preferBody: Bool) {
+            if let existing = byUser[note.id] {
+                if preferBody,
+                   (existing.body == nil || existing.body?.isEmpty == true),
+                   let body = note.body, !body.isEmpty {
+                    byUser[note.id] = note
+                }
+            } else {
+                byUser[note.id] = note
+                order.append(note.id)
+            }
+        }
+
+        for visit in visits.sorted(by: { $0.visitedAt > $1.visitedAt }) {
+            let body = visit.summary?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            upsert(
+                FriendPlaceNote(
+                    id: visit.userID,
+                    person: visit.person,
+                    body: (body?.isEmpty == false) ? body : nil,
+                    sortDate: visit.visitedAt
+                ),
+                preferBody: true
+            )
+        }
+
+        for visitor in visitors {
+            upsert(
+                FriendPlaceNote(
+                    id: visitor.id,
+                    person: visitor.person,
+                    body: nil,
+                    sortDate: nil
+                ),
+                preferBody: false
+            )
+        }
+
+        return order.compactMap { byUser[$0] }
+            .sorted { lhs, rhs in
+                switch (lhs.sortDate, rhs.sortDate) {
+                case let (l?, r?): return l > r
+                case (_?, nil): return true
+                case (nil, _?): return false
+                case (nil, nil): return false
+                }
+            }
+    }
+}
+
+private struct FriendPlaceNote: Identifiable {
+    let id: UUID
+    var person: PersonSummary
+    var body: String?
+    var sortDate: Date?
 }
 
 /// Save-to-wishlist and send-to-friend.
@@ -318,27 +284,17 @@ struct PlaceActionsRow: View {
     var unsavedSaveLabel: String = "Save"
     var savedSaveLabel: String = "Saved"
 
-    @Environment(WishlistStore.self) private var wishlist
-    @Environment(SocialStatsCache.self) private var stats
-    @Environment(\.modelContext) private var modelContext
-    @Environment(AuthManager.self) private var auth
-    @Environment(SyncEngine.self) private var sync
-
-    @State private var isSaving = false
     @State private var showSendSheet = false
-
-    private var savedEntry: WishlistEntry? { wishlist.entry(forPlace: place.id) }
-
-    /// See `WantToTryMirror`: a save has to land in the local Want to try list
-    /// too, or it never shows up anywhere the user looks.
-    private var mirror: WantToTryMirror? {
-        guard let userID = auth.state.profile?.id else { return nil }
-        return WantToTryMirror(context: modelContext, userID: userID)
-    }
 
     var body: some View {
         HStack(spacing: 10) {
-            saveButton
+            WantToTryButton(
+                place: place,
+                unsavedLabel: unsavedSaveLabel,
+                savedLabel: savedSaveLabel,
+                minHeight: 44,
+                prominentWhenUnsaved: true
+            )
 
             Button {
                 Haptics.tap()
@@ -354,35 +310,74 @@ struct PlaceActionsRow: View {
             SendPlaceSheet(place: place, photo: photo)
         }
     }
+}
 
-    /// Written as an if/else rather than a ternary over two button styles:
-    /// `buttonStyle` is generic over the style type, so the two branches have
-    /// different types and a ternary doesn't type-check.
-    @ViewBuilder
-    private var saveButton: some View {
-        let isSaved = savedEntry != nil
-        let button = Button {
+/// The wishlist toggle half of `PlaceActionsRow`, on its own — for surfaces
+/// that want just the save action and not the send button alongside it (a
+/// friend's write-up ends with this single button, the same way your own
+/// ends with a single Send button).
+struct WantToTryButton: View {
+    let place: PlaceSummary
+    /// When saving from a friend's write-up, copy their photos and note into the
+    /// local mirror so the saved row matches the standard visit modal.
+    var sourceVisit: FriendVisit? = nil
+    var unsavedLabel: String = "Want to try"
+    var savedLabel: String = "Saved"
+    /// 48 matches `ReadOnlyWriteUpView`'s standalone Send button; `PlaceActionsRow`
+    /// passes 44 to line up with the Send button sharing its row.
+    var minHeight: CGFloat = 48
+    /// Own-visit's Send button is always `.glass`, never prominent — matched
+    /// here by default so the two full-screen write-ups end the same way.
+    /// `PlaceActionsRow` opts into the louder unsaved state instead, since
+    /// there it's sharing the row with a second, lower-priority action.
+    var prominentWhenUnsaved: Bool = false
+
+    @Environment(WishlistStore.self) private var wishlist
+    @Environment(SocialStatsCache.self) private var stats
+    @Environment(\.modelContext) private var modelContext
+    @Environment(AuthManager.self) private var auth
+    @Environment(SyncEngine.self) private var sync
+
+    @State private var isSaving = false
+
+    private var savedEntry: WishlistEntry? { wishlist.entry(forPlace: place.id) }
+    private var isSaved: Bool { savedEntry != nil }
+
+    /// See `WantToTryMirror`: a save has to land in the local Want to try list
+    /// too, or it never shows up anywhere the user looks.
+    private var mirror: WantToTryMirror? {
+        guard let userID = auth.state.profile?.id else { return nil }
+        return WantToTryMirror(context: modelContext, userID: userID)
+    }
+
+    var body: some View {
+        // Written as an if/else rather than a ternary over two button styles:
+        // `buttonStyle` is generic over the style type, so the two branches
+        // have different types and a ternary doesn't type-check.
+        if !isSaved && prominentWhenUnsaved {
+            button.buttonStyle(.glassProminent)
+        } else {
+            button.buttonStyle(.glass)
+        }
+    }
+
+    private var button: some View {
+        Button {
             Haptics.tap()
             Task { await toggleSaved() }
         } label: {
             Label(
-                isSaved ? savedSaveLabel : unsavedSaveLabel,
+                isSaved ? savedLabel : unsavedLabel,
                 systemImage: isSaved ? "bookmark.fill" : "bookmark"
             )
             .font(.subheadline.weight(.semibold))
             .lineLimit(1)
             .minimumScaleFactor(0.75)
-            .frame(maxWidth: .infinity, minHeight: 44)
+            .frame(maxWidth: .infinity, minHeight: minHeight)
             .opacity(isSaving ? 0 : 1)
             .overlay { if isSaving { ProgressView().controlSize(.small) } }
         }
         .disabled(isSaving)
-
-        if isSaved {
-            button.buttonStyle(.glass)
-        } else {
-            button.buttonStyle(.glassProminent)
-        }
     }
 
     private func toggleSaved() async {
@@ -394,7 +389,7 @@ struct PlaceActionsRow: View {
             if removed { mirror?.removeMirror(placeID: place.id) }
         } else {
             let saved = await wishlist.add(placeID: place.id)
-            if saved { mirror?.mirror(place) }
+            if saved { await mirror?.mirror(place, from: sourceVisit) }
         }
         sync.requestSync(reason: .newLocalWrite)
         // The user's own action — must be reflected immediately rather than
@@ -406,7 +401,14 @@ struct PlaceActionsRow: View {
 /// A place opened from the inbox, explore feed, wishlist, or a gap row.
 ///
 /// Same sheet as tapping a map pin: photos, tags, friend visits, and the note
-/// someone sent with it.
+/// someone sent with it — for a pin with more than one visit behind it. A
+/// saved place backed by exactly one friend visit and nothing of the user's
+/// own skips straight to that friend's full write-up instead, the same
+/// one-visit shortcut `MapHome.open(_:)` takes for a map pin. Without it this
+/// sheet showed the place header and then, underneath, a second smaller
+/// card repeating the same photo and name — `PlaceDetailSheet`'s
+/// `FriendVisitCard` row, built for stacking several visits, looking odd as
+/// the only one.
 struct RecommendedPlaceSheet: View {
     let place: PlaceSummary
     var seedVisits: [FriendVisit] = []
@@ -420,7 +422,7 @@ struct RecommendedPlaceSheet: View {
     @Environment(AuthManager.self) private var auth
     @Environment(FriendVisitCache.self) private var friendCache
     @Environment(FeedStore.self) private var feed
-    @Environment(SocialDemoMode.self) private var demo
+    @Environment(\.dismiss) private var dismiss
 
     @State private var fetchedVisits: [FriendVisit] = []
 
@@ -438,12 +440,31 @@ struct RecommendedPlaceSheet: View {
         )
     }
 
+    /// Nothing of the user's own here, exactly one friend's visit, and no
+    /// recommendation note to show above it (only `PlaceDetailSheet` renders
+    /// that banner) — the same condition under which a map pin skips the
+    /// place sheet entirely and opens the visit itself.
+    private var soleFriendVisit: FriendVisit? {
+        guard recommendationNote == nil, group.ownVisits.isEmpty else { return nil }
+        return mergedFriendVisits.count == 1 ? mergedFriendVisits.first : nil
+    }
+
     var body: some View {
-        PlaceDetailSheet(
-            group: group,
-            onOpenOwnVisit: onOpenOwnVisit,
-            recommendationNote: recommendationNote
-        )
+        Group {
+            if let visit = soleFriendVisit {
+                NavigationStack {
+                    FriendVisitWriteUpView(visit: visit, onDismiss: { dismiss() })
+                        .flatModalToolbarBackground()
+                }
+                .flatModalBackground()
+            } else {
+                PlaceDetailSheet(
+                    group: group,
+                    onOpenOwnVisit: onOpenOwnVisit,
+                    recommendationNote: recommendationNote
+                )
+            }
+        }
         .task { await loadSenderVisitsIfNeeded() }
     }
 
@@ -452,8 +473,7 @@ struct RecommendedPlaceSheet: View {
             placeID: place.id,
             seed: seedVisits + fetchedVisits,
             cache: friendCache,
-            feed: feed,
-            demo: demo
+            feed: feed
         )
     }
 
@@ -490,8 +510,7 @@ enum SocialPlaceVisits {
         placeID: UUID,
         seed: [FriendVisit] = [],
         cache: FriendVisitCache,
-        feed: FeedStore,
-        demo: SocialDemoMode
+        feed: FeedStore
     ) -> [FriendVisit] {
         var byID: [UUID: FriendVisit] = [:]
         for visit in seed where visit.placeID == placeID {
@@ -502,11 +521,6 @@ enum SocialPlaceVisits {
         }
         for item in feed.items where item.visit.placeID == placeID {
             byID[item.visit.id] = item.visit
-        }
-        if demo.isEnabled {
-            for visit in demo.visits(atPlace: placeID) {
-                byID[visit.id] = visit
-            }
         }
         return byID.values.sorted { $0.visitedAt > $1.visitedAt }
     }

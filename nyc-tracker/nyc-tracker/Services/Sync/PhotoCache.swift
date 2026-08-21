@@ -33,6 +33,13 @@ final class PhotoCache {
     private let maxBytes: Int64 = 250 * 1024 * 1024
     private var evictionTargetBytes: Int64 { maxBytes * 3 / 4 }
 
+    /// Prefetch bounds. Three at a time is enough to keep the connection busy
+    /// without competing with the image a view is waiting on, and 40 paths is
+    /// roughly two screens of the profile grid — past that the user has scrolled
+    /// and the lazy path is a better predictor than anything decided up front.
+    private let prefetchConcurrency = 3
+    private let prefetchLimit = 40
+
     private let directory: URL
     private let fileManager = FileManager.default
 
@@ -104,11 +111,63 @@ final class PhotoCache {
 
     /// Drop everything. Called on sign-out so the next account can't read the
     /// previous one's images out of the cache.
+    ///
+    /// Deleting the files is not sufficient on its own: `ImageMemoryCache` holds
+    /// the *decoded* versions of the same photos and outlives the session, so a
+    /// disk-only clear would leave the previous account's images drawable for as
+    /// long as the process lives.
     func clear() {
         for task in inFlight.values { task.cancel() }
         inFlight.removeAll()
         try? fileManager.removeItem(at: directory)
         try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        ImageMemoryCache.shared.clear()
+    }
+
+    // MARK: - Prefetch
+
+    /// Warm the cache for photos that are about to be needed.
+    ///
+    /// The lazy path in `PhotoView` is still what fetches anything that actually
+    /// gets drawn; this only moves the round trip earlier for a set the caller
+    /// knows it is about to render — the first rows of the profile activity
+    /// grid, the photos of the visits just returned for the map. The difference
+    /// is a grid that fills in as the user's thumb arrives versus one that
+    /// starts downloading when it does.
+    ///
+    /// Bounded on both axes: at most `prefetchLimit` paths, at most
+    /// `prefetchConcurrency` at a time. An unbounded version of this is how a
+    /// prefetch turns into a stampede that starves the image the user is
+    /// actually looking at.
+    func prefetch(_ storagePaths: [String]) {
+        // `cachedURL` bumps the LRU date as it checks, which is the right side
+        // effect here: a path we were about to fetch is a path about to be drawn.
+        let wanted = Array(
+            storagePaths
+                .prefix(prefetchLimit)
+                .filter { cachedURL(for: $0) == nil && inFlight[$0] == nil }
+        )
+        guard !wanted.isEmpty else { return }
+        let concurrency = min(prefetchConcurrency, wanted.count)
+
+        Task { [weak self] in
+            await withTaskGroup(of: Void.self) { group in
+                var next = 0
+                while next < concurrency {
+                    let path = wanted[next]
+                    group.addTask { _ = await self?.file(for: path) }
+                    next += 1
+                }
+                // Refill as each finishes, so `concurrency` requests stay in
+                // flight rather than the whole list going out at once.
+                while await group.next() != nil {
+                    guard next < wanted.count else { continue }
+                    let path = wanted[next]
+                    next += 1
+                    group.addTask { _ = await self?.file(for: path) }
+                }
+            }
+        }
     }
 
     // MARK: - Paths
@@ -117,21 +176,9 @@ final class PhotoCache {
     /// go into a flat filename. Hashing keeps the mapping stable and collision-free
     /// enough without creating a directory tree that then has to be pruned.
     private func localURL(for storagePath: String) -> URL {
-        let name = String(format: "%016llx", UInt64(bitPattern: Int64(stableHash(storagePath))))
+        let name = StableHash.filenameToken(storagePath)
         let ext = (storagePath as NSString).pathExtension
         return directory.appendingPathComponent(ext.isEmpty ? name : "\(name).\(ext)")
-    }
-
-    /// FNV-1a. `Hasher` is explicitly seeded per process, so its values differ
-    /// between launches — using it here would orphan the entire cache on every
-    /// cold start while still counting the files against the size cap.
-    private func stableHash(_ string: String) -> Int64 {
-        var hash: UInt64 = 0xcbf29ce484222325
-        for byte in string.utf8 {
-            hash ^= UInt64(byte)
-            hash = hash &* 0x100000001b3
-        }
-        return Int64(bitPattern: hash)
     }
 
     // MARK: - Eviction

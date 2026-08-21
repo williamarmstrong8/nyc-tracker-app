@@ -203,6 +203,7 @@ final class SyncEngine {
         // offline doesn't get uploaded and then immediately tombstoned — two
         // round trips and a row that briefly exists for no reason.
         await drainDeletions(userID: userID)
+        await drainPhotoDeletions(userID: userID)
         await pushPendingVisits(userID: userID)
         await pushPendingCategoryCorrections(userID: userID)
         await pull(userID: userID)
@@ -298,13 +299,10 @@ final class SyncEngine {
                 userID: userID,
                 placeID: placeID,
                 visitedAt: visit.visitedOn,
-                transcript: visit.transcript.isEmpty ? nil : visit.transcript,
-                summary: visit.enrichedDescription.isEmpty ? nil : visit.enrichedDescription,
+                summary: visit.note.isEmpty ? nil : visit.note,
                 tags: visit.tags,
                 title: visit.title.isEmpty ? nil : visit.title,
-                topQuote: visit.topQuote.isEmpty ? nil : visit.topQuote,
                 ratingLabel: visit.rating?.rawValue,
-                returnIntent: visit.returnIntent?.rawValue,
                 kind: visit.kind.rawValue,
                 deletedAt: nil
             )
@@ -411,7 +409,8 @@ final class SyncEngine {
             guard let localData = loadLocalImageData(for: photo) else {
                 // No bytes on disk and nothing uploaded — the row would point at
                 // nothing. Drop it rather than failing the whole visit: the
-                // transcript and write-up are worth more than one missing image.
+                // note and the rest of the entry are worth more than one
+                // missing image.
                 continue
             }
 
@@ -555,6 +554,50 @@ final class SyncEngine {
         }
     }
 
+    /// Tombstone every locally-removed photo upstream: delete its
+    /// `visit_photos` row, then its storage objects.
+    ///
+    /// Order matches `drainDeletions` — the row goes first so a half-finished
+    /// attempt leaves an orphaned storage object rather than a live row
+    /// pointing at nothing.
+    private func drainPhotoDeletions(userID: UUID) async {
+        guard let context else { return }
+
+        let now = Date()
+        let tombstones = ((try? context.fetch(Self.pendingPhotoDeletionsDescriptor(for: userID))) ?? [])
+            .filter { ($0.nextAttemptAt ?? .distantPast) <= now }
+
+        for tombstone in tombstones {
+            if Task.isCancelled { return }
+            do {
+                try await client
+                    .from("visit_photos")
+                    .delete()
+                    .eq("id", value: tombstone.photoID.uuidString)
+                    .execute()
+
+                if !tombstone.storagePaths.isEmpty {
+                    _ = try? await client.storage
+                        .from(bucket)
+                        .remove(paths: tombstone.storagePaths)
+                }
+
+                context.delete(tombstone)
+                try? context.save()
+
+            } catch {
+                let failure = SyncFailure.classify(error)
+                if case .authExpired = failure {
+                    await handleAuthExpiry()
+                    return
+                }
+                tombstone.attemptCount += 1
+                tombstone.nextAttemptAt = backoffDate(for: tombstone.attemptCount)
+                try? context.save()
+            }
+        }
+    }
+
     // MARK: - Pull
 
     /// Fetch this user's visits and reconcile them into the local mirror.
@@ -671,11 +714,10 @@ final class SyncEngine {
         visit.visitedOn = row.visitedAt
         visit.title = row.title ?? row.place?.name ?? visit.title
         visit.tags = row.tags
-        visit.enrichedDescription = row.summary ?? ""
-        visit.transcript = row.transcript ?? ""
-        visit.topQuote = row.topQuote ?? ""
-        visit.rating = row.ratingLabel.flatMap(Rating.init(rawValue:))
-        visit.returnIntent = row.returnIntent.flatMap(ReturnIntent.init(rawValue:))
+        visit.note = row.summary ?? ""
+        // Loosely, so a row a previous version of the app wrote as `loved` or
+        // `fine` still resolves to a verdict instead of coming back blank.
+        visit.rating = Rating.from(loose: row.ratingLabel)
         visit.kind = VisitKind(rawValue: row.kind) ?? .visited
         visit.ownerUserID = userID
         visit.remoteID = row.id
@@ -1027,7 +1069,10 @@ final class SyncEngine {
         if pending.contains(where: { ($0.nextAttemptAt ?? .distantPast) <= now }) { return true }
 
         let deletions = (try? context.fetch(Self.pendingDeletionsDescriptor(for: userID))) ?? []
-        return deletions.contains(where: { ($0.nextAttemptAt ?? .distantPast) <= now })
+        if deletions.contains(where: { ($0.nextAttemptAt ?? .distantPast) <= now }) { return true }
+
+        let photoDeletions = (try? context.fetch(Self.pendingPhotoDeletionsDescriptor(for: userID))) ?? []
+        return photoDeletions.contains(where: { ($0.nextAttemptAt ?? .distantPast) <= now })
     }
 
     // MARK: - Counts
@@ -1042,8 +1087,9 @@ final class SyncEngine {
         let pending = (try? context.fetchCount(Self.pendingVisitsDescriptor(for: userID))) ?? 0
         let failed = (try? context.fetchCount(Self.failedVisitsDescriptor(for: userID))) ?? 0
         let deletions = (try? context.fetchCount(Self.pendingDeletionsDescriptor(for: userID))) ?? 0
+        let photoDeletions = (try? context.fetchCount(Self.pendingPhotoDeletionsDescriptor(for: userID))) ?? 0
 
-        pendingCount = pending + deletions
+        pendingCount = pending + deletions + photoDeletions
         failedCount = failed
     }
 
@@ -1142,6 +1188,14 @@ final class SyncEngine {
         let owner: UUID? = userID
         return FetchDescriptor<PendingDeletion>(
             predicate: #Predicate<PendingDeletion> { $0.ownerUserID == owner },
+            sortBy: [SortDescriptor(\.requestedAt)]
+        )
+    }
+
+    private static func pendingPhotoDeletionsDescriptor(for userID: UUID) -> FetchDescriptor<PendingPhotoDeletion> {
+        let owner: UUID? = userID
+        return FetchDescriptor<PendingPhotoDeletion>(
+            predicate: #Predicate<PendingPhotoDeletion> { $0.ownerUserID == owner },
             sortBy: [SortDescriptor(\.requestedAt)]
         )
     }

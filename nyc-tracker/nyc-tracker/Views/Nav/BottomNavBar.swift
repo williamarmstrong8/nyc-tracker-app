@@ -44,6 +44,15 @@ struct BottomNavBar: View {
         )
     }
 
+    /// Extra breathing room below the last scroll row so content doesn't sit
+    /// flush against the dock. Applied via `contentMargins` on scroll views.
+    static let scrollContentExtraPadding: CGFloat = 16
+
+    /// Dock clearance plus extra scroll padding for tab pages with a `ScrollView`.
+    static var scrollContentClearance: CGFloat {
+        contentClearance + scrollContentExtraPadding
+    }
+
     var activeTab: AppTab
     /// Pending items awaiting the user's response: incoming friend requests
     /// and unread messages.
@@ -53,7 +62,6 @@ struct BottomNavBar: View {
     var onFriends: () -> Void
     var onLogVisit: () -> Void
     var onWantToTry: () -> Void
-    var onFindPlace: () -> Void
     var onProfile: () -> Void
 
     @Environment(AuthManager.self) private var auth
@@ -140,9 +148,7 @@ struct BottomNavBar: View {
         return inset ?? 34
     }
 
-    /// Three ways in, in the order they are reached for: from photos you just
-    /// took, from a place you already know the name of, and from Apple Maps when
-    /// you have neither.
+    /// Two ways in: from photos you just took, or from a name you type.
     private var newEntryCards: some View {
         HStack(spacing: 10) {
             newEntryCard(
@@ -161,15 +167,6 @@ struct BottomNavBar: View {
             ) {
                 dismissNewEntryOptions()
                 onWantToTry()
-            }
-
-            newEntryCard(
-                title: "Find a place",
-                systemImage: "mappin.and.ellipse",
-                glassID: "action-find"
-            ) {
-                dismissNewEntryOptions()
-                onFindPlace()
             }
         }
     }
@@ -273,19 +270,9 @@ struct BottomNavBar: View {
     @ViewBuilder
     private var profileAvatarView: some View {
         if let profile = auth.state.profile {
-            PersonAvatar(
-                person: PersonSummary(
-                    id: profile.id,
-                    username: profile.username,
-                    displayName: profile.displayName,
-                    avatarURL: profile.avatarURL
-                ),
-                size: Self.profileAvatar
-            )
+            PersonAvatar(person: profile.personSummary, size: Self.profileAvatar)
         } else {
-            Image("Logo")
-                .resizable()
-                .scaledToFill()
+            PersonUnknownAvatar()
                 .frame(width: Self.profileAvatar, height: Self.profileAvatar)
                 .clipShape(Circle())
         }

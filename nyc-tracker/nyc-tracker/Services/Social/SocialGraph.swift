@@ -50,9 +50,21 @@ final class SocialGraph {
     private(set) var recommendations: [InboxRecommendation] = []
 
     private(set) var isLoading = false
-    /// False until the first successful load. Distinguishes "no friends" from
-    /// "haven't looked yet", which are different empty states.
+    /// False until there is something real to draw. Distinguishes "no friends"
+    /// from "haven't looked yet", which are different empty states.
+    ///
+    /// A disk snapshot satisfies it, not just a server response. That is the
+    /// point of the snapshot: the friends list, the map's audience control and
+    /// every relationship button read this to decide between content and a
+    /// spinner, and gating them on the network is what made a cold launch show
+    /// an empty graph for as long as the request took. The refetch is already in
+    /// flight when this flips, and it overwrites everything the moment it lands.
     private(set) var hasLoaded = false
+
+    /// True while what is on screen came from disk rather than from this
+    /// session's fetch. Nothing gates on it today; it exists so a "last updated"
+    /// affordance or an offline notice has an honest signal to read.
+    private(set) var isShowingSnapshot = false
 
     /// Set when a refresh or mutation fails in a way worth showing.
     var lastError: PresentableError?
@@ -131,6 +143,10 @@ final class SocialGraph {
         guard self.userID != userID else { return }
         self.userID = userID
         clearState()
+        // Draw last session's graph first, then correct it. Ordering matters:
+        // `refresh()` is fired after the snapshot is applied so the two can
+        // never race into showing stale data on top of fresh.
+        hydrateFromSnapshot(userID: userID)
         refresh()
     }
 
@@ -148,6 +164,7 @@ final class SocialGraph {
         outgoing = []
         recommendations = []
         hasLoaded = false
+        isShowingSnapshot = false
         isLoading = false
         lastError = nil
     }
@@ -181,6 +198,8 @@ final class SocialGraph {
             apply(edges)
             recommendations = recs
             hasLoaded = true
+            isShowingSnapshot = false
+            persistSnapshot(edges: edges, recommendations: recs)
         } catch {
             guard !Task.isCancelled else { return }
             // A failed refresh keeps whatever was already loaded. Blanking the
@@ -264,6 +283,10 @@ final class SocialGraph {
             recommendations[index].status = .read
             recommendations[index].readAt = Date()
         }
+        // Write through rather than waiting for the next `reload`. A badge that
+        // the user cleared and that comes back on the next cold launch reads as
+        // the app forgetting, and the server already agrees with this state.
+        persistRecommendations()
 
         Task { [unread] in
             // A failure here is genuinely not worth surfacing: the cost is a
@@ -286,6 +309,7 @@ final class SocialGraph {
 
         do {
             try await RecommendationService.dismiss(id)
+            persistRecommendations()
             return true
         } catch {
             recommendations = previous
@@ -299,9 +323,61 @@ final class SocialGraph {
         guard userID != nil else { return }
         do {
             recommendations = try await RecommendationService.inboxRecommendations()
+            persistRecommendations()
         } catch {
             // Keep what's on screen; the next full reload will correct it.
         }
+    }
+
+    // MARK: - Snapshot
+
+    /// How old a cached graph may be and still be worth drawing.
+    ///
+    /// Generous on purpose. This is not a freshness policy — the refetch fired
+    /// alongside it is — it is a floor that stops an app reopened after months
+    /// away from flashing a long-dead friends list during the second before the
+    /// network answers. Inside a fortnight, last session's graph is very nearly
+    /// always this session's graph.
+    private static let snapshotMaxAge: TimeInterval = 14 * 24 * 60 * 60
+
+    private func hydrateFromSnapshot(userID: UUID) {
+        let store = SnapshotStore.shared
+
+        if let edges = store.load(
+            [FriendshipEdge].self, .friendships, userID: userID, maxAge: Self.snapshotMaxAge
+        ) {
+            apply(edges)
+            hasLoaded = true
+            isShowingSnapshot = true
+        }
+
+        if let recs = store.load(
+            [InboxRecommendation].self, .recommendations, userID: userID, maxAge: Self.snapshotMaxAge
+        ) {
+            recommendations = recs
+            isShowingSnapshot = true
+        }
+    }
+
+    /// Written from `reload` only — never from a mutation.
+    ///
+    /// Mutations all end in a `reload()`, so the snapshot is always a copy of a
+    /// server response rather than of an optimistic local edit. That is what
+    /// keeps a failed accept from being cached as a friendship: the retry inside
+    /// `mutate` refetches the truth, and only the truth is written.
+    ///
+    /// The one exception is the read cursor on recommendations, handled in
+    /// `markRecommendationsRead` — the badge has to stay down across a relaunch.
+    private func persistSnapshot(edges: [FriendshipEdge], recommendations: [InboxRecommendation]) {
+        guard let userID else { return }
+        let store = SnapshotStore.shared
+        store.save(edges, .friendships, userID: userID)
+        store.save(recommendations, .recommendations, userID: userID)
+    }
+
+    private func persistRecommendations() {
+        guard let userID else { return }
+        SnapshotStore.shared.save(recommendations, .recommendations, userID: userID)
     }
 
     private func mutate(_ operation: () async throws -> Void) async -> Bool {

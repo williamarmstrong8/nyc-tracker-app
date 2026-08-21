@@ -20,9 +20,37 @@ final class AppRouter {
     /// the composer and steal the bottom of the screen, so chat turns it off.
     var hidesBottomBar = false
 
-    /// Jump to the map. Used after picking a friend to view.
+    /// Wired once from `ContentView`, which owns both. `weak` because
+    /// `AppRouter` doesn't own their lifetime — it just needs to reach them
+    /// at the moment of a "view on map" jump, from views (chat, discover, a
+    /// friend's profile) that were never handed the filter directly.
+    private weak var filter: EntryFilter?
+    private weak var mapAudience: MapAudienceStore?
+
+    func configure(filter: EntryFilter, mapAudience: MapAudienceStore) {
+        self.filter = filter
+        self.mapAudience = mapAudience
+    }
+
+    /// Jump to the map. Used after picking a friend to view, or from any
+    /// "View on map" action.
+    ///
+    /// Always clears the category/tag/kind filter first: it was set (or left
+    /// over) in whatever screen the tap came from, and a stale filter can hide
+    /// the very pin the caller is trying to show.
     func showMap() {
+        filter?.reset()
         activeTab = .home
         homeMode = .map
+    }
+
+    /// Same as `showMap()`, but for jumps that originate from one of the
+    /// signed-in user's own visits — a want-to-try save, a freshly confirmed
+    /// capture, or "View on map" on one's own write-up. Also forces the map
+    /// audience back to "my places", since leaving it on a friend or
+    /// "all friends" would hide the very pin being shown.
+    func showMyMap() {
+        mapAudience?.select(.mine)
+        showMap()
     }
 }

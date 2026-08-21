@@ -45,7 +45,9 @@ struct nyc_trackerApp: App {
             // RootView is the auth gate. ContentView — the existing app — is only
             // reachable from inside it, and only with a session and a username.
             Group {
-                if ProcessInfo.processInfo.arguments.contains("-searchHarness") {
+                if ProcessInfo.processInfo.arguments.contains("-navDelayHarness") {
+                    NavDelayHarnessRoot()
+                } else if ProcessInfo.processInfo.arguments.contains("-searchHarness") {
                     SearchHarnessRoot()
                 } else {
                     RootView()
@@ -55,7 +57,6 @@ struct nyc_trackerApp: App {
                 .environment(sync)
                 .environment(social)
                 .environment(chat)
-                .environment(SocialDemoMode.shared)
                 // App-wide: no scroll indicators anywhere. Set once here rather
                 // than on every individual ScrollView/List/Form, since this
                 // environment value is inherited by every descendant scrollable

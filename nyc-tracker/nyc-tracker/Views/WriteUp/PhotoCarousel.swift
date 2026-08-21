@@ -7,6 +7,7 @@ struct PhotoCarousel: View {
     let sources: [PhotoView.Source]
 
     @State private var currentIndex: Int?
+    @State private var showZoom = false
 
     var body: some View {
         if sources.isEmpty {
@@ -16,11 +17,18 @@ struct PhotoCarousel: View {
                 ScrollView(.horizontal) {
                     LazyHStack(spacing: 0) {
                         ForEach(0..<sources.count, id: \.self) { index in
-                            PhotoView(source: sources[index], contentMode: .fill)
+                            Color.clear
                                 .containerRelativeFrame(.horizontal)
                                 .frame(maxHeight: .infinity)
+                                .overlay {
+                                    PhotoView(source: sources[index], contentMode: .fill)
+                                }
                                 .clipped()
                                 .id(index)
+                                .onTapGesture {
+                                    Haptics.tap()
+                                    showZoom = true
+                                }
                         }
                     }
                     .scrollTargetLayout()
@@ -28,6 +36,7 @@ struct PhotoCarousel: View {
                 .scrollTargetBehavior(.paging)
                 .scrollPosition(id: $currentIndex)
                 .scrollIndicators(.hidden)
+                .scrollDisabled(sources.count <= 1)
                 .onAppear {
                     if currentIndex == nil { currentIndex = 0 }
                 }
@@ -36,6 +45,9 @@ struct PhotoCarousel: View {
                     pageDots
                         .padding(.bottom, 10)
                 }
+            }
+            .fullScreenCover(isPresented: $showZoom) {
+                PhotoZoomViewer(sources: sources, currentIndex: currentIndex ?? 0)
             }
         }
     }

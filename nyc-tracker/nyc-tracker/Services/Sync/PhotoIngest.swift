@@ -12,11 +12,10 @@ import SwiftUI
 /// existed, a 4 MB upload too.
 ///
 /// Downscaling here rather than at upload time is deliberate. The work happens
-/// once, while the user is still reading the write-up, instead of on every retry
-/// of a failed upload; the local file and the uploaded file are byte-identical,
-/// so a resumed upload re-reads rather than re-encodes; and the on-disk footprint
-/// drops by roughly an order of magnitude for images the app never draws above
-/// 2048px anyway.
+/// once at save time instead of on every retry of a failed upload; the local
+/// file and the uploaded file are byte-identical, so a resumed upload re-reads
+/// rather than re-encodes; and the on-disk footprint drops by roughly an order
+/// of magnitude for images the app never draws above 2048px anyway.
 enum PhotoIngest {
 
     /// Prepare every picked item, in order. Failures are skipped rather than

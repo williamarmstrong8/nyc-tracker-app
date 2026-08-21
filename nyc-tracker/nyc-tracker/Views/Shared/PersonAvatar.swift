@@ -67,43 +67,46 @@ struct PersonAvatar: View {
             .accessibilityHidden(true)
     }
 
+    /// Initials are both the fallback and the loading state.
+    ///
+    /// A dead or offline avatar URL therefore renders as initials rather than a
+    /// broken-image glyph, and a face the app has cached draws in the first
+    /// frame — `AvatarImage` holds the decoded image across the view rebuilds
+    /// that a scrolling list produces constantly.
     @ViewBuilder
     private var avatarContent: some View {
-        if let urlString = person.avatarURL,
-           let url = URL(string: urlString) {
-            AsyncImage(url: url) { phase in
-                switch phase {
-                case .success(let image):
-                    image.resizable().scaledToFill()
-                case .failure:
-                    // A dead avatar URL falls back to initials rather than a
-                    // broken-image glyph. The bucket is public and the URL is
-                    // cache-busted on upload, so this is usually just offline.
-                    initials
-                case .empty:
-                    ZStack {
-                        tint.opacity(0.2)
-                        ProgressView().controlSize(.mini)
-                    }
-                @unknown default:
-                    initials
-                }
-            }
-        } else {
-            initials
+        AvatarImage(urlString: person.avatarURL) {
+            PersonInitialsView(person: person)
         }
     }
+}
 
-    private var initials: some View {
-        ZStack {
-            LinearGradient(
-                colors: [tint.opacity(0.9), tint.opacity(0.45)],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-            Text(initialsText)
-                .font(.system(size: size * 0.38, weight: .semibold, design: .rounded))
-                .foregroundStyle(.white)
+/// Initials on the person's palette colour — the content half of
+/// `PersonAvatar`'s fallback, pulled out so other surfaces that build their
+/// own `AvatarImage` (the signed-in user's own avatar, which has nowhere else
+/// to get a `PersonSummary` from at the exact call site) can draw the same
+/// fallback instead of reaching for generic art like the app logo.
+///
+/// Sizes itself off the frame it's given rather than taking an explicit size,
+/// so it drops into a fixed-frame avatar and an animating
+/// `matchedGeometryEffect` expansion equally well.
+struct PersonInitialsView: View {
+    let person: PersonSummary
+
+    private var tint: Color { FriendPalette.color(for: person.id) }
+
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack {
+                LinearGradient(
+                    colors: [tint.opacity(0.9), tint.opacity(0.45)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+                Text(initialsText)
+                    .font(.system(size: proxy.size.width * 0.38, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white)
+            }
         }
     }
 
@@ -119,6 +122,24 @@ struct PersonAvatar: View {
         if !words.isEmpty { return words.joined().uppercased() }
         if let first = person.username?.first { return String(first).uppercased() }
         return "•"
+    }
+}
+
+/// Neutral placeholder for when there isn't even a person to draw yet — the
+/// signed-in profile hasn't loaded. Distinct from `PersonInitialsView`, which
+/// needs a name to compute initials from; this needs nothing, so it's the
+/// correct fallback for the sliver of time before `AuthManager` has a
+/// profile, rather than borrowing the app's logo to stand in for a face.
+struct PersonUnknownAvatar: View {
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack {
+                Color(uiColor: .tertiarySystemFill)
+                Image(systemName: "person.fill")
+                    .font(.system(size: proxy.size.width * 0.46, weight: .light))
+                    .foregroundStyle(.secondary)
+            }
+        }
     }
 }
 

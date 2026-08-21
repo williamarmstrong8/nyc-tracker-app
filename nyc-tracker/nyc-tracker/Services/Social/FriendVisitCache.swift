@@ -14,11 +14,18 @@ import Observation
 /// when the session ends, and holding it only in memory makes that free rather
 /// than a deletion pass that can half-fail.
 ///
-/// Image bytes are the exception, and they already have a home: `PhotoCache`
-/// writes them to `Caches/`, which is re-downloadable, never backed up, evicted
-/// under pressure, and cleared on sign-out. So there is a modest disk layer for
-/// images and none at all for rows, which is the right split — the rows are
-/// cheap to refetch and the JPEGs are not.
+/// Image bytes have always been the exception, and they already have a home:
+/// `PhotoCache` writes them to `Caches/`, which is re-downloadable, never backed
+/// up, evicted under pressure, and cleared on sign-out.
+///
+/// The rows now get a thin version of the same treatment, and for a reason the
+/// argument above does not cover: rows being cheap to refetch says nothing about
+/// what the map looks like *while* they are being refetched, which is empty. One
+/// `SnapshotStore` file — the last result set and the audience it was for — is
+/// enough for a cold launch to draw yesterday's pins in its first frame. It is
+/// still `Caches/`, still cleared on sign-out, still never SwiftData, and
+/// crucially it never establishes coverage: the fetch always runs, and the
+/// snapshot is only what fills the screen until it lands.
 ///
 /// ## Coverage rather than keys
 ///
@@ -82,6 +89,16 @@ final class FriendVisitCache {
     private var coveredAudience: MapAudience?
     private var loadTask: Task<Void, Never>?
 
+    private var userID: UUID?
+
+    /// Last session's pins, held until the map asks for an audience they match.
+    ///
+    /// Not applied at `configure` time, because at that moment the map has not
+    /// said what it is showing — and pins from "all friends" drawn onto a map set
+    /// to one specific person are worse than no pins. The first `request` resolves
+    /// it: matching audience adopts them, anything else discards them.
+    private var pendingSnapshot: Snapshot?
+
     /// Monotonic id for the fetch currently allowed to write state.
     ///
     /// Without it, a superseded fetch's cleanup lands after its replacement has
@@ -92,6 +109,19 @@ final class FriendVisitCache {
     private var currentFetchID = 0
 
     init() {}
+
+    /// Point the cache at a signed-in user and load last session's pins.
+    ///
+    /// Idempotent for the same user, matching `SocialGraph.configure` and
+    /// `ChatStore.configure`, so it is safe from a `.task(id:)`.
+    func configure(userID: UUID) {
+        guard self.userID != userID else { return }
+        self.userID = userID
+        clearResults()
+        pendingSnapshot = SnapshotStore.shared.load(
+            Snapshot.self, .friendVisits, userID: userID, maxAge: Self.snapshotMaxAge
+        )
+    }
 
     // MARK: - Loading
 
@@ -106,6 +136,8 @@ final class FriendVisitCache {
             clearResults()
             return
         }
+
+        adoptSnapshotIfMatching(audience)
 
         if isCovered(bounds: bounds, audience: audience) { return }
 
@@ -145,12 +177,10 @@ final class FriendVisitCache {
     private func fetch(bounds: GeoBounds, audience: MapAudience) async {
         // Fail fast and specifically rather than waiting out a URLSession
         // timeout to produce a vaguer message.
-        if !SocialDemoMode.shared.isEnabled {
-            guard NetworkMonitor.shared.isReachable else {
-                failure = .offline
-                isLoading = false
-                return
-            }
+        guard NetworkMonitor.shared.isReachable else {
+            failure = .offline
+            isLoading = false
+            return
         }
 
         let target = bounds.expanded(by: overfetchFraction)
@@ -174,6 +204,7 @@ final class FriendVisitCache {
 
             visits = rows
             failure = nil
+            persistSnapshot(rows: rows, audience: audience)
             // Exactly `resultLimit` rows almost certainly means there were more.
             // Treating the boundary case (exactly N and no more) as truncated
             // costs one redundant fetch; the reverse would hide pins.
@@ -211,14 +242,65 @@ final class FriendVisitCache {
         // switch back to "mine") has already happened.
         currentFetchID += 1
         visits = []
+        pendingSnapshot = nil
         failure = nil
         isLoading = false
         invalidateCoverage()
     }
 
-    /// Sign-out. Everything here is in memory, so this is the whole cleanup —
-    /// image bytes are `PhotoCache`'s to clear, and `RootView` already does that.
+    // MARK: - Snapshot
+
+    /// Shorter than the graph's fortnight. A friends list barely changes in two
+    /// weeks; where those friends have been changes constantly, and a day-old
+    /// pin that a friend has since deleted is a pin that should not be drawn for
+    /// longer than it takes one fetch to correct it.
+    private static let snapshotMaxAge: TimeInterval = 24 * 60 * 60
+
+    /// Capped well under `resultLimit`. This file is read synchronously at
+    /// launch, and its job is to make the visible map non-empty, not to reproduce
+    /// a fully zoomed-out result set.
+    private static let snapshotVisitLimit = 120
+
+    /// The pins, plus which audience they were fetched for.
+    ///
+    /// `MapAudience` is stored as its `storageValue` string — the same encoding
+    /// `MapAudienceStore` already persists to `UserDefaults` — rather than by
+    /// making the enum `Codable`. One representation of "which map is this",
+    /// written in one place.
+    private struct Snapshot: Codable, Sendable {
+        var audience: String
+        var visits: [FriendVisit]
+    }
+
+    /// Take last session's pins if they were for the map now being shown.
+    ///
+    /// Deliberately does not set coverage: `isCovered` is checked straight after
+    /// this and must still say no, so the fetch runs. The pins are what the user
+    /// looks at for the ~300ms until it does.
+    private func adoptSnapshotIfMatching(_ audience: MapAudience) {
+        guard let snapshot = pendingSnapshot else { return }
+        pendingSnapshot = nil
+
+        guard snapshot.audience == audience.storageValue, visits.isEmpty else { return }
+        visits = snapshot.visits
+    }
+
+    private func persistSnapshot(rows: [FriendVisit], audience: MapAudience) {
+        guard let userID else { return }
+        SnapshotStore.shared.save(
+            Snapshot(
+                audience: audience.storageValue,
+                visits: Array(rows.prefix(Self.snapshotVisitLimit))
+            ),
+            .friendVisits,
+            userID: userID
+        )
+    }
+
+    /// Sign-out. State here is in memory and the one file on disk belongs to
+    /// `SnapshotStore`, which `RootView` clears alongside the image caches.
     func teardown() {
+        userID = nil
         clearResults()
     }
 }

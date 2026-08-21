@@ -95,7 +95,7 @@ struct RecommendPlaceParams: Encodable, Sendable {
 /// Broken out because four different results carry the same seven columns, and
 /// a place that renders differently on the inbox row than on the wishlist row
 /// is a bug waiting to be reported as "the category is wrong on one screen".
-struct PlaceSummary: Identifiable, Hashable, Sendable {
+struct PlaceSummary: Codable, Identifiable, Hashable, Sendable {
     let id: UUID
     var name: String
     var categoryRaw: String?
@@ -156,7 +156,7 @@ extension Array where Element == Recommender {
 
 // MARK: - Inbox recommendation
 
-struct InboxRecommendation: Decodable, Identifiable, Hashable, Sendable {
+struct InboxRecommendation: Codable, Identifiable, Hashable, Sendable {
     let id: UUID
     var status: RecommendationStatus
     var message: String?
@@ -223,6 +223,35 @@ struct InboxRecommendation: Decodable, Identifiable, Hashable, Sendable {
         )
         alreadyVisited = try container.decodeIfPresent(Bool.self, forKey: .alreadyVisited) ?? false
         onWishlist = try container.decodeIfPresent(Bool.self, forKey: .onWishlist) ?? false
+    }
+
+    /// Written by hand because `place` is flattened across seven keys, so there
+    /// is no property-to-key mapping for the compiler to synthesise from.
+    ///
+    /// Only `SnapshotStore` encodes this — the server never reads a
+    /// recommendation back. It is the exact inverse of the decode above, which
+    /// is the property that matters: a snapshot is byte-identical to the row the
+    /// server sent, and reading one back runs the same code path as a response.
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(status, forKey: .status)
+        try container.encodeIfPresent(message, forKey: .message)
+        try container.encodeIfPresent(createdAt, forKey: .createdAt)
+        try container.encodeIfPresent(readAt, forKey: .readAt)
+        try container.encode(senderID, forKey: .senderID)
+        try container.encodeIfPresent(username, forKey: .username)
+        try container.encodeIfPresent(displayName, forKey: .displayName)
+        try container.encodeIfPresent(avatarURL, forKey: .avatarURL)
+        try container.encode(place.id, forKey: .placeID)
+        try container.encode(place.name, forKey: .placeName)
+        try container.encodeIfPresent(place.categoryRaw, forKey: .placeCategory)
+        try container.encodeIfPresent(place.neighborhood, forKey: .neighborhood)
+        try container.encodeIfPresent(place.streetAddress, forKey: .streetAddress)
+        try container.encode(place.latitude, forKey: .latitude)
+        try container.encode(place.longitude, forKey: .longitude)
+        try container.encode(alreadyVisited, forKey: .alreadyVisited)
+        try container.encode(onWishlist, forKey: .onWishlist)
     }
 }
 

@@ -8,11 +8,10 @@ import SwiftUI
 /// middle is identical. Photo and type float on the page; there is no wrapping
 /// fill.
 ///
-/// Everything on it is world-readable: transcript, summary, pull quote, tags,
-/// photos. There is no redaction path and no permission branch, which is the
-/// whole point of the schema's read model. If a private-visit feature ever
-/// lands, this is one of the two places that changes (the other is the map
-/// query) — not fifteen.
+/// Everything on it is world-readable: note, tags, verdict, photos. There is no
+/// redaction path and no permission branch, which is the whole point of the
+/// schema's read model. If a private-visit feature ever lands, this is one of the
+/// two places that changes (the other is the map query) — not fifteen.
 struct FriendVisitCard: View {
     let visit: FriendVisit
     /// Draws the author row. Off on a profile, where every card is the same
@@ -20,8 +19,6 @@ struct FriendVisitCard: View {
     var showsAuthor: Bool = true
     /// Marks this as the signed-in user's own entry.
     var isOwnVisit: Bool = false
-
-    @State private var showTranscript = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -38,12 +35,6 @@ struct FriendVisitCard: View {
                     Text(summary)
                         .font(.subheadline)
                         .foregroundStyle(.primary)
-                }
-                if let quote = nonEmpty(visit.topQuote) {
-                    pullQuote(quote)
-                }
-                if let transcript = nonEmpty(visit.transcript) {
-                    transcriptDisclosure(transcript)
                 }
             }
             .padding(.horizontal, 10)
@@ -128,8 +119,8 @@ struct FriendVisitCard: View {
         // Wraps rather than clipping: tags are the fastest way to scan a card and
         // a single truncated line hides most of them.
         FlowLayout(spacing: 6) {
-            ForEach(visit.tags, id: \.self) { tag in
-                Text(tag)
+            ForEach(VenueTag.sorted(visit.tags), id: \.self) { tag in
+                Text(VenueTag.label(forRawValue: tag))
                     .font(.caption2.weight(.medium))
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 8)
@@ -139,73 +130,10 @@ struct FriendVisitCard: View {
         }
     }
 
-    private func pullQuote(_ quote: String) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            Rectangle()
-                .fill(Color.accentColor.opacity(0.5))
-                .frame(width: 3)
-                .clipShape(Capsule())
-            Text("\u{201C}\(quote)\u{201D}")
-                .font(.subheadline.italic())
-                .foregroundStyle(.secondary)
-        }
-        .fixedSize(horizontal: false, vertical: true)
-    }
-
-    private func transcriptDisclosure(_ transcript: String) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Button {
-                withAnimation(.snappy) { showTranscript.toggle() }
-            } label: {
-                HStack(spacing: 4) {
-                    Text(showTranscript ? "Hide transcript" : "Show transcript")
-                    Image(systemName: "chevron.down")
-                        .rotationEffect(.degrees(showTranscript ? 0 : -90))
-                }
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.plain)
-
-            if showTranscript {
-                Text(transcript)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
-            }
-        }
-    }
-
     private func nonEmpty(_ text: String?) -> String? {
         guard let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return nil
         }
         return text
-    }
-}
-
-/// One friend's visit, without the place chrome (save/send, "who's been here",
-/// your own entries). Used from a friend's profile and a single-friend map pin.
-struct FriendVisitDetailSheet: View {
-    let visit: FriendVisit
-
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        NavigationStack {
-            ScrollView {
-                FriendVisitCard(visit: visit, showsAuthor: true)
-                    .padding(.vertical, 16)
-            }
-            .background(Color(uiColor: .systemBackground))
-            .navigationTitle(visit.placeName)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }
-                }
-            }
-        }
-        .presentationDragIndicator(.visible)
     }
 }

@@ -15,13 +15,18 @@ struct TagChip: View {
     }
 }
 
+/// Read-only chips for the tags on an entry.
+///
+/// Takes raw `VenueTag` values — what the model and the database store — and
+/// renders their labels, so "amazing-ambience" reads as "Amazing ambience"
+/// everywhere without every call site remembering to convert.
 struct TagChipRow: View {
     let tags: [String]
 
     var body: some View {
         FlowLayout(spacing: 8) {
-            ForEach(tags, id: \.self) { tag in
-                TagChip(text: tag)
+            ForEach(VenueTag.sorted(tags), id: \.self) { tag in
+                TagChip(text: VenueTag.label(forRawValue: tag))
             }
         }
     }

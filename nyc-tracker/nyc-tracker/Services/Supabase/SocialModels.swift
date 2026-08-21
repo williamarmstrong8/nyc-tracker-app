@@ -14,6 +14,14 @@ import Foundation
 //
 // Nothing here ever reaches SwiftData. Friend data is browsable, not owned; the
 // local store is the user's own mirror and stays that way.
+//
+// Several of these are `Codable` rather than `Decodable` even though the server
+// never reads them back. The encode half exists for `SnapshotStore`, which
+// writes them to `Caches/` so a cold launch has friends and pins to draw before
+// the network answers. It deliberately reuses the wire `CodingKeys` instead of a
+// parallel set of cache DTOs: the snapshot is then byte-identical to what the
+// server sent, so reading one back exercises exactly the same decode path as a
+// response, and there is no second shape to keep in sync when a column moves.
 // ============================================================================
 
 // MARK: - Person
@@ -23,7 +31,7 @@ import Foundation
 /// Three different RPCs return a person alongside their payload (a search hit, a
 /// friendship edge, the author of a visit). Normalising them onto one type here
 /// means the avatar and name views are written once instead of three times.
-struct PersonSummary: Identifiable, Hashable, Sendable {
+struct PersonSummary: Codable, Identifiable, Hashable, Sendable {
     let id: UUID
     var username: String?
     var displayName: String?
@@ -121,6 +129,39 @@ struct ProfileSearchResult: Decodable, Identifiable, Hashable, Sendable {
     }
 }
 
+// MARK: - recommended_friends
+
+/// A friend-of-a-friend the caller isn't already connected to, from
+/// `recommended_friends`. Always has at least one mutual friend — the
+/// function excludes zero-mutual candidates rather than padding the list.
+struct RecommendedFriend: Decodable, Identifiable, Hashable, Sendable {
+    let id: UUID
+    var username: String?
+    var displayName: String?
+    var avatarURL: String?
+    var bio: String?
+    var mutualCount: Int
+
+    var person: PersonSummary {
+        PersonSummary(id: id, username: username, displayName: displayName, avatarURL: avatarURL)
+    }
+
+    /// "1 mutual friend" / "3 mutual friends", for the row subtitle in place
+    /// of the usual @handle line.
+    var mutualFriendsLabel: String {
+        mutualCount == 1 ? "1 mutual friend" : "\(mutualCount) mutual friends"
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case username
+        case displayName = "display_name"
+        case avatarURL   = "avatar_url"
+        case bio
+        case mutualCount = "mutual_count"
+    }
+}
+
 // MARK: - friendship_edges
 
 /// One friendship, flattened to "the other person + which way it points".
@@ -128,7 +169,7 @@ struct ProfileSearchResult: Decodable, Identifiable, Hashable, Sendable {
 /// The server already resolved which column the caller sits in, so no view has
 /// to ask "am I the requester here" — that question does not survive past the
 /// API boundary.
-struct FriendshipEdge: Decodable, Identifiable, Hashable, Sendable {
+struct FriendshipEdge: Codable, Identifiable, Hashable, Sendable {
     enum Direction: String, Codable, Sendable {
         case outgoing
         case incoming
@@ -181,7 +222,7 @@ struct FriendshipEdge: Decodable, Identifiable, Hashable, Sendable {
 /// Arrives as a `jsonb` array inlined in the visit row rather than as a second
 /// request. Only the fields a carousel needs — there is no editing of someone
 /// else's photo, so width/height/EXIF would be dead weight over the wire.
-struct FriendVisitPhoto: Decodable, Identifiable, Hashable, Sendable {
+struct FriendVisitPhoto: Codable, Identifiable, Hashable, Sendable {
     let id: UUID
     var storagePath: String
     var thumbPath: String?
@@ -206,7 +247,7 @@ struct FriendVisitPhoto: Decodable, Identifiable, Hashable, Sendable {
 /// identity column upstream is `user_id`, not `id` — `PersonSummary` is an app
 /// type shared by half a dozen surfaces and does not get reshaped to match one
 /// RPC's column naming.
-struct TaggedPerson: Decodable, Identifiable, Hashable, Sendable {
+struct TaggedPerson: Codable, Identifiable, Hashable, Sendable {
     let id: UUID
     var username: String?
     var displayName: String?
@@ -226,16 +267,15 @@ struct TaggedPerson: Decodable, Identifiable, Hashable, Sendable {
 
 /// One visit as returned by `visits_in_bounds` — the visit, its place, and its
 /// author, denormalised into a flat row.
-struct FriendVisit: Decodable, Identifiable, Hashable, Sendable {
+struct FriendVisit: Codable, Identifiable, Hashable, Sendable {
     let visitID: UUID
     var visitedAt: Date
     var title: String?
+    /// The author's note about the place. `visits.summary` on the wire — see
+    /// `RemoteVisit.summary` for why the column is still called that.
     var summary: String?
-    var transcript: String?
-    var topQuote: String?
     var tags: [String]
     var ratingLabel: String?
-    var returnIntent: String?
     /// `visited` | `wantToTry`.
     var kind: String
 
@@ -258,6 +298,56 @@ struct FriendVisit: Decodable, Identifiable, Hashable, Sendable {
     var tagged: [TaggedPerson]
 
     var id: UUID { visitID }
+
+    /// The custom `Codable` conformance below (needed for `SnapshotStore`'s
+    /// snake_case wire format) suppresses Swift's synthesised memberwise
+    /// initializer, so it has to be written out by hand — otherwise the one
+    /// call site that builds a `FriendVisit` from a chat message's own columns
+    /// (there's no server row to decode when a place card falls back to what
+    /// the message carries) fails to compile.
+    init(
+        visitID: UUID,
+        visitedAt: Date,
+        title: String?,
+        summary: String?,
+        tags: [String],
+        ratingLabel: String?,
+        kind: String,
+        placeID: UUID,
+        placeName: String,
+        placeCategory: String?,
+        neighborhood: String?,
+        streetAddress: String?,
+        latitude: Double,
+        longitude: Double,
+        userID: UUID,
+        username: String?,
+        displayName: String?,
+        avatarURL: String?,
+        photos: [FriendVisitPhoto],
+        tagged: [TaggedPerson] = []
+    ) {
+        self.visitID = visitID
+        self.visitedAt = visitedAt
+        self.title = title
+        self.summary = summary
+        self.tags = tags
+        self.ratingLabel = ratingLabel
+        self.kind = kind
+        self.placeID = placeID
+        self.placeName = placeName
+        self.placeCategory = placeCategory
+        self.neighborhood = neighborhood
+        self.streetAddress = streetAddress
+        self.latitude = latitude
+        self.longitude = longitude
+        self.userID = userID
+        self.username = username
+        self.displayName = displayName
+        self.avatarURL = avatarURL
+        self.photos = photos
+        self.tagged = tagged
+    }
 
     var person: PersonSummary {
         PersonSummary(id: userID, username: username, displayName: displayName, avatarURL: avatarURL)
@@ -303,11 +393,8 @@ struct FriendVisit: Decodable, Identifiable, Hashable, Sendable {
         case visitedAt     = "visited_at"
         case title
         case summary
-        case transcript
-        case topQuote      = "top_quote"
         case tags
         case ratingLabel   = "rating_label"
-        case returnIntent  = "return_intent"
         case kind
         case placeID       = "place_id"
         case placeName     = "place_name"
@@ -330,13 +417,10 @@ struct FriendVisit: Decodable, Identifiable, Hashable, Sendable {
         visitedAt = try container.decode(Date.self, forKey: .visitedAt)
         title = try container.decodeIfPresent(String.self, forKey: .title)
         summary = try container.decodeIfPresent(String.self, forKey: .summary)
-        transcript = try container.decodeIfPresent(String.self, forKey: .transcript)
-        topQuote = try container.decodeIfPresent(String.self, forKey: .topQuote)
         // Defensive default, same reasoning as RemoteVisitWithRelations: one
         // unexpected null must not fail an entire page of map results.
         tags = try container.decodeIfPresent([String].self, forKey: .tags) ?? []
         ratingLabel = try container.decodeIfPresent(String.self, forKey: .ratingLabel)
-        returnIntent = try container.decodeIfPresent(String.self, forKey: .returnIntent)
         kind = try container.decodeIfPresent(String.self, forKey: .kind) ?? "visited"
         placeID = try container.decode(UUID.self, forKey: .placeID)
         placeName = try container.decode(String.self, forKey: .placeName)
@@ -351,6 +435,35 @@ struct FriendVisit: Decodable, Identifiable, Hashable, Sendable {
         avatarURL = try container.decodeIfPresent(String.self, forKey: .avatarURL)
         photos = try container.decodeIfPresent([FriendVisitPhoto].self, forKey: .photos) ?? []
         tagged = try container.decodeIfPresent([TaggedPerson].self, forKey: .tagged) ?? []
+    }
+
+    /// Written by hand because a custom `init(from:)` suppresses synthesised
+    /// `Encodable`. Only `SnapshotStore` encodes this — the server never reads a
+    /// visit back. Inverse of the decode above, including the defensive defaults
+    /// (`tags`, `kind`, `photos`, `tagged`) so a snapshot round-trips as the
+    /// same row the decoder would accept from the wire.
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(visitID, forKey: .visitID)
+        try container.encode(visitedAt, forKey: .visitedAt)
+        try container.encodeIfPresent(title, forKey: .title)
+        try container.encodeIfPresent(summary, forKey: .summary)
+        try container.encode(tags, forKey: .tags)
+        try container.encodeIfPresent(ratingLabel, forKey: .ratingLabel)
+        try container.encode(kind, forKey: .kind)
+        try container.encode(placeID, forKey: .placeID)
+        try container.encode(placeName, forKey: .placeName)
+        try container.encodeIfPresent(placeCategory, forKey: .placeCategory)
+        try container.encodeIfPresent(neighborhood, forKey: .neighborhood)
+        try container.encodeIfPresent(streetAddress, forKey: .streetAddress)
+        try container.encode(latitude, forKey: .latitude)
+        try container.encode(longitude, forKey: .longitude)
+        try container.encode(userID, forKey: .userID)
+        try container.encodeIfPresent(username, forKey: .username)
+        try container.encodeIfPresent(displayName, forKey: .displayName)
+        try container.encodeIfPresent(avatarURL, forKey: .avatarURL)
+        try container.encode(photos, forKey: .photos)
+        try container.encode(tagged, forKey: .tagged)
     }
 }
 

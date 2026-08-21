@@ -101,7 +101,7 @@ struct ManualVenueEntryView: View {
             onSelect(candidate)
             // We were pushed via NavigationLink; the parent flow may swap its root content
             // entirely once onSelect advances the stage, which doesn't reliably pop this pushed
-            // screen on its own. Pop explicitly so the write-up shows right away.
+            // screen on its own. Pop explicitly so saving starts right away.
             dismiss()
         }
     }

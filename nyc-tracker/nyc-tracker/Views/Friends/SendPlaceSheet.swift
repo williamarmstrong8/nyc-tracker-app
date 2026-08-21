@@ -54,11 +54,10 @@ struct SendPlaceSheet: View {
                     picker
                 }
             }
-            .background(Color(uiColor: .systemBackground))
+            .flatModalContentBackground()
             .navigationTitle(results == nil ? "Send to friends" : "Sent")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(Color(uiColor: .systemBackground), for: .navigationBar)
-            .toolbarBackgroundVisibility(.visible, for: .navigationBar)
+            .flatModalToolbarBackground()
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button(results == nil ? "Cancel" : "Done") { dismiss() }
@@ -80,7 +79,7 @@ struct SendPlaceSheet: View {
                 }
             }
         }
-        .presentationBackground(Color(uiColor: .systemBackground))
+        .flatModalBackground()
     }
 
     // MARK: - Picker
@@ -147,33 +146,35 @@ struct SendPlaceSheet: View {
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
         .listSectionSpacing(20)
-        .background(Color(uiColor: .systemBackground))
+        .flatModalContentBackground()
         .animation(.default, value: selected.isEmpty)
         .appSearchable(text: $query, prompt: "Search friends")
     }
 
     @ViewBuilder
     private var placeHeader: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Color.clear
-                .aspectRatio(3 / 4, contentMode: .fit)
-                .overlay { placeThumbnail }
-                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        HStack(alignment: .center, spacing: 14) {
+            placeThumbnail
+                .frame(width: 64, height: 64)
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(place.name)
-                    .font(.title3.weight(.semibold))
-                    .lineLimit(2)
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+
                 if let subtitle = place.subtitle {
                     Text(subtitle)
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
-                        .lineLimit(2)
+                        .lineLimit(1)
                 }
             }
-            .padding(.horizontal, 4)
+
+            Spacer(minLength: 0)
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, 8)
     }
 
     /// The real photo when the caller has one; otherwise the same
@@ -186,7 +187,7 @@ struct SendPlaceSheet: View {
             ZStack {
                 categoryTint(place.category).opacity(0.18)
                 Image(systemName: categorySymbol(place.category))
-                    .font(.system(size: 36, weight: .ultraLight))
+                    .font(.system(size: 22, weight: .light))
                     .foregroundStyle(categoryTint(place.category))
             }
         }
@@ -202,8 +203,7 @@ struct SendPlaceSheet: View {
             }
         } label: {
             FriendPersonRow(
-                person: edge.person,
-                showsPaletteRing: true
+                person: edge.person
             ) {
                 Image(systemName: selected.contains(edge.userID)
                       ? "checkmark.circle.fill" : "circle")
@@ -313,7 +313,7 @@ private struct SendResultsList: View {
         }
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
-        .background(Color(uiColor: .systemBackground))
+        .flatModalContentBackground()
     }
 
     private func caption(for outcome: RecommendationOutcome, name: String) -> String {

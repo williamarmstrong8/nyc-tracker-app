@@ -3,14 +3,13 @@ import SwiftData
 import PhotosUI
 
 /// Full-screen capture flow presented once the user has already picked photos from the library.
-/// Stages: details → processing → (venue picker) → write-up.
+/// Stages: details → processing → (venue picker) → save.
 struct CaptureFlowView: View {
     let userID: UUID
 
     @Environment(\.modelContext) private var modelContext
     @Environment(SyncEngine.self) private var sync
     @Bindable var coordinator: CaptureCoordinator
-    let enricher: EnricherProtocol
     var onConfirmedVisit: (Visit) -> Void
 
     var body: some View {
@@ -20,9 +19,9 @@ struct CaptureFlowView: View {
 
                 switch coordinator.stage {
                 case .details:
-                    DetailsView(coordinator: coordinator, enricher: enricher)
+                    DetailsView(coordinator: coordinator)
                 case .processing:
-                    ProcessingOverlay()
+                    ProcessingOverlay(message: "Finding place…")
                 case .venuePicker:
                     VenuePickerView(
                         candidates: coordinator.venueCandidates,
@@ -31,21 +30,17 @@ struct CaptureFlowView: View {
                     ) { picked in
                         coordinator.applyVenue(picked)
                     }
-                case .writeUp:
-                    WriteUpView(
-                        coordinator: coordinator,
-                        onConfirm: {
-                            Task {
-                                let repository = VisitRepository(context: modelContext, userID: userID)
-                                let visit = await coordinator.confirm(using: repository)
-                                onConfirmedVisit(visit)
-                                // Confirm already returned and the map is showing
-                                // the new pin; this just wakes the queue. Nothing
-                                // above it awaited the network.
-                                sync.requestSync(reason: .newLocalWrite)
-                            }
+                case .saving:
+                    ProcessingOverlay(message: "Saving…")
+                        .task {
+                            let repository = VisitRepository(context: modelContext, userID: userID)
+                            let visit = await coordinator.confirm(using: repository)
+                            onConfirmedVisit(visit)
+                            // Confirm already returned and the map is showing
+                            // the new pin; this just wakes the queue. Nothing
+                            // above it awaited the network.
+                            sync.requestSync(reason: .newLocalWrite)
                         }
-                    )
                 }
             }
             .toolbar {
@@ -62,11 +57,13 @@ struct CaptureFlowView: View {
 // MARK: - Processing overlay
 
 struct ProcessingOverlay: View {
+    var message: String = "Finding place…"
+
     var body: some View {
         VStack(spacing: 16) {
             ProgressView()
                 .scaleEffect(1.4)
-            Text("Enriching…")
+            Text(message)
                 .font(.headline)
                 .foregroundStyle(.secondary)
         }

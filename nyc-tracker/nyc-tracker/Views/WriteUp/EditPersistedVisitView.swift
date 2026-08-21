@@ -1,158 +1,63 @@
 import SwiftUI
 import SwiftData
+import PhotosUI
 
-/// Edit a Visit that's already been saved to SwiftData. Bound directly to the model, so autosave
-/// keeps changes without needing an explicit repository call.
+/// Edit a Visit that's already been saved to SwiftData.
+///
+/// Bound directly to the model, so the fields need no staging area — Cancel
+/// rolls the context back and Save goes through `VisitRepository` to re-queue the
+/// row for upload.
 struct EditPersistedVisitView: View {
     @Bindable var visit: Visit
+    /// When true, the sheet opened from "Mark as visited" — flip to visited on
+    /// appear so the rating field shows, without mutating the model in the
+    /// parent (which would flash the Send button under the sheet).
+    var promoteToVisited: Bool = false
     @Environment(\.modelContext) private var modelContext
     @Environment(SyncEngine.self) private var sync
     @Environment(\.dismiss) private var dismiss
 
-    @State private var tagsText: String = ""
     @State private var showTagPeople = false
-    @FocusState private var focusedField: Field?
-
-    private enum Field: Hashable {
-        case title, description, quote, tags, address, name, transcript
-    }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                LabeledField(title: "Title", text: $visit.title, placeholder: "Title")
-                    .focused($focusedField, equals: .title)
-
-                LabeledField(
-                    title: "Description",
-                    text: $visit.enrichedDescription,
-                    placeholder: "Description",
-                    axis: .vertical,
-                    lineLimit: 5...20
-                )
-                .focused($focusedField, equals: .description)
-
-                LabeledField(
-                    title: "Top quote",
-                    text: $visit.topQuote,
-                    placeholder: "Pull quote",
-                    axis: .vertical,
-                    lineLimit: 1...4
-                )
-                .focused($focusedField, equals: .quote)
-
-                LabeledField(title: "Tags", text: $tagsText, placeholder: "comma separated")
-                    .focused($focusedField, equals: .tags)
-                    .onAppear { tagsText = visit.tags.joined(separator: ", ") }
-                    .onChange(of: tagsText) { _, newValue in
-                        visit.tags = newValue
-                            .split(separator: ",")
-                            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                            .filter { !$0.isEmpty }
-                    }
-
-                // Bound straight to the model. `saveEdit` on the way out is
-                // what re-queues the row, and the feed re-orders on the next
-                // pull because `visited_at` is what every surface sorts on.
-                VisitDateField(date: $visit.visitedOn, showsHint: false)
-
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Tagged")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                    TagPeopleField(tagged: visit.taggedPeopleOrdered.map(\.person)) {
-                        showTagPeople = true
-                    }
+        VisitEditForm(
+            title: $visit.title,
+            note: $visit.note,
+            tags: $visit.tags,
+            rating: ratingBinding,
+            // Bound straight to the model. `saveEdit` on the way out is what
+            // re-queues the row, and the feed re-orders on the next pull because
+            // `visited_at` is what every surface sorts on.
+            visitedOn: $visit.visitedOn,
+            address: addressBinding,
+            nameOverride: nameOverrideBinding,
+            category: visit.place.map(categoryBinding),
+            kind: kindBinding,
+            photoSources: visit.photosOrdered.map { PhotoView.Source(photo: $0) },
+            onDeletePhoto: { index in
+                let ordered = visit.photosOrdered
+                guard ordered.indices.contains(index) else { return }
+                VisitRepository(context: modelContext, userID: visit.ownerUserID)
+                    .deletePhoto(ordered[index], from: visit)
+                sync.requestSync(reason: .newLocalWrite)
+            },
+            onMovePhoto: { offsets, target in
+                // In-memory only, like every other field here — see
+                // `reorderPhotos`. The Save button below is what queues it.
+                VisitRepository(context: modelContext, userID: visit.ownerUserID)
+                    .reorderPhotos(in: visit, fromOffsets: offsets, toOffset: target)
+            },
+            onAddPhotos: { items in
+                Task {
+                    let rows = await PhotoIngest.rows(from: items)
+                    VisitRepository(context: modelContext, userID: visit.ownerUserID)
+                        .addPhotos(rows, to: visit)
+                    sync.requestSync(reason: .newLocalWrite)
                 }
-
-                LabeledField(
-                    title: "Address",
-                    text: Binding(get: { visit.address ?? "" }, set: { visit.address = $0.isEmpty ? nil : $0 }),
-                    placeholder: "Address"
-                )
-                .focused($focusedField, equals: .address)
-
-                LabeledField(
-                    title: "Name override",
-                    text: Binding(get: { visit.nameOverride ?? "" }, set: { visit.nameOverride = $0.isEmpty ? nil : $0 }),
-                    placeholder: "Name override"
-                )
-                .focused($focusedField, equals: .name)
-
-                if let place = visit.place {
-                    VStack(alignment: .leading, spacing: 8) {
-                        labeledMenu("Type") {
-                            Picker("Type", selection: bindingForCategory(of: place)) {
-                                ForEach(PlaceCategory.allCases, id: \.self) { category in
-                                    Text(category.rawValue.capitalized).tag(category)
-                                }
-                            }
-                            .labelsHidden()
-                            .pickerStyle(.menu)
-                            .tint(.primary)
-                        }
-                        Text("Fix it here if Apple mistagged this venue — for example a restaurant that shows up as a cafe.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Rating")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                    Picker("Rating", selection: bindingForRating()) {
-                        Text("None").tag(Optional<Rating>.none)
-                        ForEach(Rating.allCases) { rating in
-                            Text(rating.label).tag(Optional(rating))
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                }
-
-                labeledMenu("Return") {
-                    Picker("Return", selection: bindingForReturnIntent()) {
-                        Text("None").tag(Optional<ReturnIntent>.none)
-                        ForEach(ReturnIntent.allCases) { intent in
-                            Text(intent.label).tag(Optional(intent))
-                        }
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.menu)
-                    .tint(.primary)
-                }
-
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Kind")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                    Picker("Kind", selection: bindingForKind()) {
-                        ForEach(VisitKind.allCases) { kind in
-                            Text(kind.label).tag(kind)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                }
-
-                if !visit.transcript.isEmpty {
-                    LabeledField(
-                        title: "Transcript (verbatim)",
-                        text: $visit.transcript,
-                        placeholder: "Transcript",
-                        axis: .vertical,
-                        lineLimit: 4...20
-                    )
-                    .foregroundStyle(.secondary)
-                    .focused($focusedField, equals: .transcript)
-                }
-            }
-            .padding(.horizontal, 20)
-            .padding(.top, 12)
-            .padding(.bottom, 40)
-        }
-        .scrollDismissesKeyboard(.interactively)
+            },
+            taggedPeople: visit.taggedPeopleOrdered.map(\.person),
+            onEditTaggedPeople: { showTagPeople = true }
+        )
         .sheet(isPresented: $showTagPeople) {
             TagPeoplePicker(initialSelection: visit.taggedPeopleOrdered.map(\.person)) { picked in
                 // Through the repository, not a bare `context.save()`: changing
@@ -164,11 +69,19 @@ struct EditPersistedVisitView: View {
                 sync.requestSync(reason: .newLocalWrite)
             }
         }
-        .background(Color(uiColor: .systemBackground))
+        .flatModalContentBackground()
         .navigationTitle("Edit")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbarBackground(Color(uiColor: .systemBackground), for: .navigationBar)
-        .toolbarBackgroundVisibility(.visible, for: .navigationBar)
+        .flatModalToolbarBackground()
+        .onAppear {
+            if promoteToVisited, visit.kind == .wantToTry {
+                visit.kind = .visited
+                // The want-to-try note is about wanting to go (or a friend's
+                // write-up copied by the mirror) — not about this visit. Clear
+                // it so the edit sheet starts blank; Cancel rolls it back.
+                visit.note = ""
+            }
+        }
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
                 Button("Save") {
@@ -187,38 +100,30 @@ struct EditPersistedVisitView: View {
                     dismiss()
                 }
             }
-            ToolbarItem(placement: .keyboard) {
-                Button("Done") { focusedField = nil }
-            }
         }
     }
 
-    private func labeledMenu<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-            content()
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 8)
-                .background(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(Color(uiColor: .secondarySystemBackground))
-                )
-        }
-    }
+    // MARK: - Bindings
 
-    private func bindingForRating() -> Binding<Rating?> {
+    private var ratingBinding: Binding<Rating?> {
         Binding(get: { visit.rating }, set: { visit.rating = $0 })
     }
-    private func bindingForReturnIntent() -> Binding<ReturnIntent?> {
-        Binding(get: { visit.returnIntent }, set: { visit.returnIntent = $0 })
+
+    private var addressBinding: Binding<String> {
+        Binding(get: { visit.address ?? "" }, set: { visit.address = $0.isEmpty ? nil : $0 })
     }
-    private func bindingForKind() -> Binding<VisitKind> {
+
+    private var nameOverrideBinding: Binding<String> {
+        Binding(get: { visit.nameOverride ?? "" }, set: { visit.nameOverride = $0.isEmpty ? nil : $0 })
+    }
+
+    private var kindBinding: Binding<VisitKind> {
         Binding(get: { visit.kind }, set: { visit.kind = $0 })
     }
-    private func bindingForCategory(of place: Place) -> Binding<PlaceCategory> {
+
+    /// Goes through `correctCategory` rather than setting `category`, so a fix to
+    /// an already-synced place gets queued for its own push.
+    private func categoryBinding(_ place: Place) -> Binding<PlaceCategory> {
         Binding(get: { place.category }, set: { place.correctCategory(to: $0) })
     }
 }

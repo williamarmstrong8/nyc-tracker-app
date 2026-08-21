@@ -2,7 +2,7 @@ import Foundation
 
 /// Supabase connection settings, read from the app bundle at launch.
 ///
-/// The values arrive via `Config/Secrets.xcconfig` (gitignored) → build settings →
+/// The values arrive via `nyc-tracker/Secrets.xcconfig` (gitignored) → build settings →
 /// `Info.plist` substitution. Nothing is hardcoded here, so the repo stays clean and
 /// a different project URL is a one-line change with no recompile of this file.
 ///
@@ -100,12 +100,15 @@ enum SupabaseConfig {
         SupabaseConfig: Info.plist key "\(key)" is missing or empty.
 
         Fix:
-          1. Copy Config/Secrets.example.xcconfig to Config/Secrets.xcconfig
+          1. Copy nyc-tracker/Secrets.example.xcconfig to
+             nyc-tracker/Secrets.xcconfig
           2. Fill in SUPABASE_PROJECT_HOST and SUPABASE_PUBLISHABLE_KEY.
              Both come from Supabase Dashboard → Settings → API Keys.
              The publishable key starts with "sb_publishable_".
-          3. Set that file as the project's configuration file
-             (Project → Info → Configurations), then clean-build.
+          3. Set it as the configuration file for the nyc-tracker TARGET under
+             BOTH Debug and Release (Project → Info → Configurations). Setting
+             only Debug builds a Release archive with no credentials, which
+             reaches TestFlight and crashes here on launch. Then clean-build.
 
         See SETUP.md for the full walkthrough.
         """

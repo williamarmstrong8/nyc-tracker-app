@@ -54,28 +54,17 @@ struct ContentView: View {
     @State private var showPhotosPicker = false
     @State private var pickerSelection: [PhotosPickerItem] = []
 
-    /// The "+" menu's one sheet slot.
-    ///
-    /// A single enum rather than a `Bool` per destination, for the reason
-    /// `MapHome.MapSheet` spells out: two `.sheet(isPresented:)` modifiers on one
-    /// view is the arrangement where the second can silently win, and one slot
-    /// also makes it impossible to ask for both at once.
-    private enum EntrySheet: String, Identifiable {
-        case wantToTry
-        case placeSearch
+    @State private var showWantToTry = false
 
-        var id: String { rawValue }
-    }
-
-    @State private var entrySheet: EntrySheet?
-
-    /// A venue picked out of Apple Maps that is on its way into the capture
-    /// flow. Held here rather than passed straight through because the photo
-    /// picker has to open first, and it cannot open until the search sheet has
-    /// finished dismissing.
+    /// A venue picked from a map POI that is on its way into the capture flow.
+    /// Held here rather than passed straight through because the photo picker
+    /// opens on the next turn once the map's action sheet has finished dismissing.
     @State private var pendingVenue: VenueCandidate?
 
-    private let enricher: EnricherProtocol = FoundationModelsEnricher()
+    /// A venue picked from a map POI on its way into the "want to try" sheet.
+    /// `nil` means the sheet was opened from the bottom nav's freeform entry
+    /// point instead, which starts with empty fields.
+    @State private var pendingWantToTryVenue: VenueCandidate?
 
     /// The map is a full-bleed canvas under the glass. Other pages stay full
     /// height too; they only add bottom safe-area padding so the last row can
@@ -101,7 +90,22 @@ struct ContentView: View {
                         ),
                         openedVisit: $openedVisit,
                         focusVisitID: $mapFocusVisitID,
-                        filter: filter
+                        filter: filter,
+                        onLogVisit: { venue in
+                            // Safe to open immediately: `MapHome` only calls
+                            // this from its `sheet(onDismiss:)`, i.e. once its
+                            // own detail card has actually finished closing.
+                            pendingVenue = venue
+                            pickerSelection = []
+                            showPhotosPicker = true
+                        },
+                        onWantToTry: { venue in
+                            // Safe to open immediately: `MapHome` only calls
+                            // this from its `sheet(onDismiss:)`, once its own
+                            // detail card has actually finished closing.
+                            pendingWantToTryVenue = venue
+                            showWantToTry = true
+                        }
                     )
                 case .discover:
                     DiscoverView()
@@ -128,8 +132,7 @@ struct ContentView: View {
                         pickerSelection = []
                         showPhotosPicker = true
                     },
-                    onWantToTry: { entrySheet = .wantToTry },
-                    onFindPlace: { entrySheet = .placeSearch },
+                    onWantToTry: { showWantToTry = true },
                     onProfile: { router.activeTab = .profile }
                 )
                 // Slide the bar itself, not the full-height container below —
@@ -164,6 +167,26 @@ struct ContentView: View {
             mapAudience.configure(userID: userID)
             wishlist.configure(userID: userID)
             feed.configure(userID: userID)
+            friendVisits.configure(userID: userID)
+            router.configure(filter: filter, mapAudience: mapAudience)
+        }
+        // A filter set on the map or list is scoped to that visit — leaving
+        // Home for another tab means the user is done with it, so the next
+        // visit to Home starts from "everything" again. Entering Home (e.g.
+        // Profile's "Been" / "Want to try" cards, which set a kind filter and
+        // then switch here) is deliberately not covered: that reset would
+        // otherwise fire immediately after they set the very filter they meant
+        // to apply.
+        .onChange(of: router.activeTab) { oldTab, newTab in
+            if oldTab == .home, newTab != .home {
+                filter.reset()
+            }
+            // Chat and Settings hide the dock via the navigation stack, but
+            // only while their tab is frontmost — switching away must restore
+            // it immediately rather than waiting for a pushed page to disappear.
+            if newTab != .friends {
+                router.hidesBottomBar = false
+            }
         }
         // Every aggregate in the cache is scoped to the friend set, so a
         // friendship change makes all of them suspect at once.
@@ -182,6 +205,15 @@ struct ContentView: View {
             // you haven't" has too.
             socialStats.invalidateAll()
         }
+        // Saving a place yourself mirrors it into Want to try on the same tap
+        // — see `WantToTryMirror`. A friend's recommendation resolves straight
+        // into the wishlist from a Postgres function, with no local tap to hang
+        // a mirror off of, so it would otherwise sit there and nowhere else.
+        // Mirroring every active entry here, on every change, catches that
+        // arrival the moment the next `wishlist.refresh()` picks it up.
+        .onChange(of: wishlist.active) { _, active in
+            mirrorActiveWishlistEntries(active)
+        }
         // Photos picker sheet fires directly — no more placeholder screen in front of it.
         .photosPicker(
             isPresented: $showPhotosPicker,
@@ -190,50 +222,53 @@ struct ContentView: View {
             matching: .images,
             photoLibrary: .shared()
         )
-        .onChange(of: showPhotosPicker) { _, isShown in
-            // When the picker closes with photos selected, start the capture flow.
-            // Backing out of the picker cancels the entry — a visit needs at least
-            // one photo — and that includes discarding any venue the user had
-            // chosen on the way in.
-            guard !isShown else { return }
-            if !pickerSelection.isEmpty {
-                captureCoordinator.begin(with: pickerSelection, venue: pendingVenue)
-                pickerSelection = []
-            }
+        // Start the entry as soon as photos land rather than waiting for
+        // `showPhotosPicker` to go false: both change in the same tap (the
+        // picker's own "Add" button confirms the selection *and* starts its
+        // dismissal together), so this fires at the earliest possible moment.
+        // It deliberately does not touch `showPhotosPicker` itself — forcing
+        // that to `false` here fights the picker's own in-flight dismissal
+        // and is what was hanging for a few seconds with dropped-XPC-session
+        // noise in the console. Left alone, the system dismissal proceeds on
+        // its own and reveals the overlay already sitting underneath it.
+        .onChange(of: pickerSelection) { _, items in
+            guard !items.isEmpty, !captureCoordinator.isPresented else { return }
+            captureCoordinator.begin(with: items, venue: pendingVenue)
             pendingVenue = nil
         }
-        .sheet(item: $entrySheet) { sheet in
-            switch sheet {
-            case .wantToTry:
-                WantToTryView(userID: userID)
-            case .placeSearch:
-                PlaceSearchView(
-                    onLogVisit: { venue in pendingVenue = venue },
-                    onWantToTry: { venue in saveWantToTry(venue) }
-                )
+        .onChange(of: showPhotosPicker) { _, isShown in
+            guard !isShown else { return }
+            pickerSelection = []
+            // Backing out of the picker with nothing chosen cancels the entry.
+            if !captureCoordinator.isPresented {
+                pendingVenue = nil
             }
         }
-        // The picker is opened here rather than from inside the search sheet:
-        // presenting it while that sheet is still dismissing gives a picker
-        // stacked on a disappearing presenter, which on device ends up
-        // undismissable. Waiting for the dismissal to land avoids the race.
-        .onChange(of: entrySheet) { _, sheet in
-            guard sheet == nil, pendingVenue != nil else { return }
-            pickerSelection = []
-            showPhotosPicker = true
+        .sheet(isPresented: $showWantToTry, onDismiss: { pendingWantToTryVenue = nil }) {
+            WantToTryView(userID: userID, preselectedVenue: pendingWantToTryVenue)
         }
-        .fullScreenCover(isPresented: bindingForCapture()) {
-            CaptureFlowView(
-                userID: userID,
-                coordinator: captureCoordinator,
-                enricher: enricher,
-                onConfirmedVisit: { visit in
-                    openedVisit = nil
-                    router.showMap()
-                    mapFocusVisitID = visit.id
-                }
-            )
+        // A custom overlay, not `.fullScreenCover` — the system cover always
+        // slides up from the bottom with no way to change the edge. This
+        // reads as a push instead: in from the trailing edge, back out the
+        // same way on dismiss.
+        .overlay {
+            if captureCoordinator.isPresented {
+                CaptureFlowView(
+                    userID: userID,
+                    coordinator: captureCoordinator,
+                    onConfirmedVisit: { visit in
+                        openedVisit = nil
+                        router.showMyMap()
+                        mapFocusVisitID = visit.id
+                    }
+                )
+                .environment(graph)
+                .environment(router)
+                .transition(.move(edge: .trailing))
+                .zIndex(1)
+            }
         }
+        .animation(.smooth(duration: 0.32), value: captureCoordinator.isPresented)
         .sheet(item: $openedVisit) { visit in
             NavigationStack {
                 ReadOnlyWriteUpView(
@@ -242,14 +277,13 @@ struct ContentView: View {
                     onShowOnMap: {
                         let id = visit.id
                         openedVisit = nil
-                        router.showMap()
+                        router.showMyMap()
                         mapFocusVisitID = id
                     }
                 )
-                .toolbarBackground(Color(uiColor: .systemBackground), for: .navigationBar)
-                .toolbarBackgroundVisibility(.visible, for: .navigationBar)
+                .flatModalToolbarBackground()
             }
-            .presentationBackground(Color(uiColor: .systemBackground))
+            .flatModalBackground()
             // Sheets don't always inherit `@State` Observable values injected
             // on the presenter; VisitFriendsSection needs these explicitly.
             .environment(graph)
@@ -257,37 +291,26 @@ struct ContentView: View {
             .environment(feed)
             .environment(socialStats)
             .environment(router)
+            .environment(wishlist)
         }
     }
 
-    /// Save a want-to-try straight from an Apple Maps result, then show it.
-    ///
-    /// No sheet, no confirmation step: everything the entry holds — name,
-    /// coordinate, category, address — came from the venue the user just tapped,
-    /// so there is nothing left to ask them. Panning the map to the new pin is
-    /// the receipt.
-    private func saveWantToTry(_ venue: VenueCandidate) {
+    /// Keeps every still-active wishlist entry mirrored into the local Want to
+    /// try list, not just the ones saved from this device. `WantToTryMirror` is
+    /// already idempotent and already refuses to touch a place the user has
+    /// been to, so re-running it over the whole active list on each change costs
+    /// a few indexed local queries and nothing else.
+    private func mirrorActiveWishlistEntries(_ active: [WishlistEntry]) {
+        let mirror = WantToTryMirror(context: modelContext, userID: userID)
         Task {
-            let described = await LocationResolver.describe(coordinate: venue.coordinate)
-            let repository = VisitRepository(context: modelContext, userID: userID)
-            let visit = repository.insertWantToTry(
-                from: venue,
-                neighborhood: described.neighborhood
-            )
-            Haptics.success()
-            sync.requestSync(reason: .newLocalWrite)
-
-            openedVisit = nil
-            router.showMap()
-            mapFocusVisitID = visit.id
+            var createdAny = false
+            for entry in active {
+                if await mirror.mirror(entry.place) { createdAny = true }
+            }
+            if createdAny {
+                sync.requestSync(reason: .newLocalWrite)
+            }
         }
-    }
-
-    private func bindingForCapture() -> Binding<Bool> {
-        Binding(
-            get: { captureCoordinator.isPresented },
-            set: { captureCoordinator.isPresented = $0 }
-        )
     }
 }
 
@@ -298,5 +321,4 @@ struct ContentView: View {
         .environment(SyncEngine())
         .environment(SocialGraph())
         .environment(ChatStore())
-        .environment(SocialDemoMode.shared)
 }

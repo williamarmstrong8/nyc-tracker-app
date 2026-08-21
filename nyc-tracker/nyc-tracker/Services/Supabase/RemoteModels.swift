@@ -50,6 +50,13 @@ struct Profile: Codable, Identifiable, Hashable, Sendable {
         guard let username, !username.isEmpty else { return nil }
         return "@\(username)"
     }
+
+    /// The signed-in user, recast as the type every avatar / name view already
+    /// knows how to draw — one fewer place that has to special-case "this
+    /// person is me".
+    var personSummary: PersonSummary {
+        PersonSummary(id: id, username: username, displayName: displayName, avatarURL: avatarURL)
+    }
 }
 
 /// Partial update payload. Only non-nil fields are sent, so a PATCH that changes
@@ -216,20 +223,20 @@ struct RemoteVisit: Codable, Identifiable, Hashable, Sendable {
     var userID: UUID
     var placeID: UUID
     var visitedAt: Date
-    /// Verbatim voice-memo transcription. The audio itself is never uploaded —
-    /// it is deleted on device the moment this text is produced.
-    var transcript: String?
-    /// On-device AI write-up.
+    /// The body text of the entry — `Visit.note` locally.
+    ///
+    /// Still named `summary` because that is the column, and the column dates
+    /// from when a model wrote it from a separate `transcript`. Both of those are
+    /// gone; this is now just what the user typed or dictated.
     var summary: String?
     var tags: [String]
     var note: String?
     /// This user's heading for the entry. Distinct from the shared `places.name`.
     var title: String?
-    /// Pull quote lifted from the transcript by the on-device model.
-    var topQuote: String?
-    /// `loved` | `liked` | `fine` | `no` — what the user tapped.
+    /// `liked` | `no` — which card the user tapped. Older rows may still hold
+    /// `loved` or `fine` from the four-point scale; read them with
+    /// `Rating.from(loose:)`.
     var ratingLabel: String?
-    var returnIntent: String?
     /// `visited` | `wantToTry`.
     var kind: String
     /// Reserved for a future Beli-style 0–10 ranking; not what the user tapped.
@@ -244,14 +251,11 @@ struct RemoteVisit: Codable, Identifiable, Hashable, Sendable {
         case userID       = "user_id"
         case placeID      = "place_id"
         case visitedAt    = "visited_at"
-        case transcript
         case summary
         case tags
         case note
         case title
-        case topQuote     = "top_quote"
         case ratingLabel  = "rating_label"
-        case returnIntent = "return_intent"
         case kind
         case rating
         case deletedAt    = "deleted_at"
@@ -274,13 +278,10 @@ struct VisitUpsert: Encodable, Sendable {
     var userID: UUID
     var placeID: UUID
     var visitedAt: Date
-    var transcript: String?
     var summary: String?
     var tags: [String]
     var title: String?
-    var topQuote: String?
     var ratingLabel: String?
-    var returnIntent: String?
     var kind: String
     /// Always written, and always explicitly — an upsert that omitted this could
     /// never un-delete, and "undo a delete" is a real path (a tombstone that
@@ -292,13 +293,10 @@ struct VisitUpsert: Encodable, Sendable {
         case userID       = "user_id"
         case placeID      = "place_id"
         case visitedAt    = "visited_at"
-        case transcript
         case summary
         case tags
         case title
-        case topQuote     = "top_quote"
         case ratingLabel  = "rating_label"
-        case returnIntent = "return_intent"
         case kind
         case deletedAt    = "deleted_at"
     }
@@ -315,12 +313,9 @@ struct VisitUpsert: Encodable, Sendable {
         // locally has to reach Postgres as SQL NULL. Omitting the key on an
         // upsert leaves the previous value in place, so the user deletes their
         // note, it syncs "successfully", and the note comes back on reinstall.
-        try container.encode(transcript, forKey: .transcript)
         try container.encode(summary, forKey: .summary)
         try container.encode(title, forKey: .title)
-        try container.encode(topQuote, forKey: .topQuote)
         try container.encode(ratingLabel, forKey: .ratingLabel)
-        try container.encode(returnIntent, forKey: .returnIntent)
         try container.encode(deletedAt, forKey: .deletedAt)
     }
 }
@@ -401,14 +396,11 @@ struct RemoteVisitWithRelations: Decodable, Identifiable, Sendable {
     var userID: UUID
     var placeID: UUID
     var visitedAt: Date
-    var transcript: String?
     var summary: String?
     var tags: [String]
     var note: String?
     var title: String?
-    var topQuote: String?
     var ratingLabel: String?
-    var returnIntent: String?
     var kind: String
     var deletedAt: Date?
     var updatedAt: Date?
@@ -421,14 +413,11 @@ struct RemoteVisitWithRelations: Decodable, Identifiable, Sendable {
         case userID       = "user_id"
         case placeID      = "place_id"
         case visitedAt    = "visited_at"
-        case transcript
         case summary
         case tags
         case note
         case title
-        case topQuote     = "top_quote"
         case ratingLabel  = "rating_label"
-        case returnIntent = "return_intent"
         case kind
         case deletedAt    = "deleted_at"
         case updatedAt    = "updated_at"
@@ -443,16 +432,13 @@ struct RemoteVisitWithRelations: Decodable, Identifiable, Sendable {
         userID = try container.decode(UUID.self, forKey: .userID)
         placeID = try container.decode(UUID.self, forKey: .placeID)
         visitedAt = try container.decode(Date.self, forKey: .visitedAt)
-        transcript = try container.decodeIfPresent(String.self, forKey: .transcript)
         summary = try container.decodeIfPresent(String.self, forKey: .summary)
         // `tags` is `not null default '{}'` upstream, but decoding defensively
         // here means one unexpected null doesn't fail the whole page of results.
         tags = try container.decodeIfPresent([String].self, forKey: .tags) ?? []
         note = try container.decodeIfPresent(String.self, forKey: .note)
         title = try container.decodeIfPresent(String.self, forKey: .title)
-        topQuote = try container.decodeIfPresent(String.self, forKey: .topQuote)
         ratingLabel = try container.decodeIfPresent(String.self, forKey: .ratingLabel)
-        returnIntent = try container.decodeIfPresent(String.self, forKey: .returnIntent)
         kind = try container.decodeIfPresent(String.self, forKey: .kind) ?? "visited"
         deletedAt = try container.decodeIfPresent(Date.self, forKey: .deletedAt)
         updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt)

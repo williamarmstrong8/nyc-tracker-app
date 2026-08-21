@@ -4,10 +4,11 @@ import Photos
 import CoreLocation
 import UIKit
 
-/// Drives the capture flow: details → processing → venue picker (optional) → write-up preview → confirm/edit.
+/// Drives the capture flow: details → processing → venue picker (optional) → save.
 ///
 /// The picker is presented from ContentView directly, so by the time this coordinator becomes
-/// active the user has already picked their photos.
+/// active the user has already picked their photos. Submit on the details screen is the
+/// confirm — once the venue is known, the entry is persisted with no preview step.
 @MainActor
 @Observable
 final class CaptureCoordinator {
@@ -15,15 +16,16 @@ final class CaptureCoordinator {
         case details
         case processing
         case venuePicker
-        case writeUp
+        case saving
     }
 
     var stage: Stage = .details
     var selectedItems: [PhotosPickerItem] = []
     var addressInput: String = ""
     var nameInput: String = ""
-    var tagsInput: String = ""
-    var transcript: String = ""
+    /// What the user typed or dictated about the place. Becomes `Visit.note`
+    /// verbatim — there is no processing step between the two any more.
+    var note: String = ""
     /// Friends the user says were there. Empty is the common case.
     var taggedPeople: [PersonSummary] = []
 
@@ -33,7 +35,7 @@ final class CaptureCoordinator {
     /// it alone means "order me by when I uploaded", which is the right default.
     var visitedOn: Date = Date()
 
-    /// Audio file that backs the transcript, if any.
+    /// Whether the note was dictated rather than typed.
     var hadVoiceNote: Bool = false
 
     // Location resolution (populated by submitDetails).
@@ -51,15 +53,13 @@ final class CaptureCoordinator {
     /// already pointed at.
     var preselectedVenue: VenueCandidate?
 
-    // Produced by enrichment; edited by user in the write-up.
+    /// Heading for the entry. Seeded from the resolved venue name once the
+    /// location is known.
     var draftTitle: String = ""
+    /// Raw `VenueTag` values, picked on the details screen before submit.
     var draftTags: [String] = []
-    var draftDescription: String = ""
-    var draftTopQuote: String = ""
+    /// Liked it or didn't. Also collected on the details screen.
     var draftRating: Rating?
-    var draftReturnIntent: ReturnIntent?
-    var draftDish: String?
-    var draftCompanions: String?
     /// Venue type, seeded from the resolved MapKit venue but user-editable — MapKit
     /// sometimes mistags a venue (a restaurant showing up as a cafe, say).
     var draftCategory: PlaceCategory = .restaurant
@@ -86,8 +86,7 @@ final class CaptureCoordinator {
         selectedItems = []
         addressInput = ""
         nameInput = ""
-        tagsInput = ""
-        transcript = ""
+        note = ""
         taggedPeople = []
         visitedOn = Date()
         hadVoiceNote = false
@@ -101,18 +100,16 @@ final class CaptureCoordinator {
         preselectedVenue = nil
         draftTitle = ""
         draftTags = []
-        draftDescription = ""
-        draftTopQuote = ""
         draftRating = nil
-        draftReturnIntent = nil
-        draftDish = nil
-        draftCompanions = nil
         draftCategory = .restaurant
     }
 
-    /// Runs location resolution + enrichment on the current inputs. If a confident venue match
-    /// isn't found, we route through the venue picker before showing the write-up.
-    func submitDetails(using enricher: EnricherProtocol) async {
+    /// Resolve where the user was, then persist (or show the venue picker first).
+    ///
+    /// Everything else on the entry was already collected on the details screen,
+    /// so this stage is only about the location: if MapKit didn't come back with
+    /// a confident match, the venue picker goes up before save.
+    func submitDetails() async {
         stage = .processing
 
         // 1) Location resolution
@@ -143,46 +140,19 @@ final class CaptureCoordinator {
         rawPlaceGuess = nameInput.isEmpty ? nil : nameInput
         draftCategory = chosenVenue?.category ?? .restaurant
 
-        // 2) Enrichment
-        let tagHints = tagsInput
-            .split(separator: ",")
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-
-        let input = EnricherInput(
-            nameHint: nameInput.isEmpty ? nil : nameInput,
-            addressHint: (resolution.address ?? addressInput).isEmptyNil,
-            venueName: chosenVenue?.name,
-            venueCategory: chosenVenue?.category,
-            tagHints: tagHints,
-            transcript: transcript
-        )
-
-        do {
-            let output = try await enricher.enrich(input)
-            draftTitle = chosenVenue?.name.nonEmpty ?? output.title
-            draftTags = output.tags
-            draftDescription = output.enrichedDescription
-            draftTopQuote = output.topQuote
-            if draftRating == nil {
-                draftRating = output.suggestedRating
-            }
-            draftDish = output.dish
-            draftCompanions = output.companions
-        } catch {
-            draftTitle = chosenVenue?.name.nonEmpty ?? (nameInput.isEmpty ? "New Spot" : nameInput)
-            draftTags = tagHints
-            draftDescription = transcript
-            draftTopQuote = ""
-        }
+        // 2) Title the entry after the venue, falling back to whatever the user
+        //    typed in the location field.
+        draftTitle = chosenVenue?.name.nonEmpty
+            ?? nameInput.nonEmpty
+            ?? "New Spot"
 
         // 3) If we don't have a confident venue pick, always show the picker so the user can
         //    confirm, tap a candidate, or fall back to manual search. A venue
-        //    the user chose off the map is already confirmed and skips it.
+        //    the user chose off the map is already confirmed and saves immediately.
         if chosenVenue == nil {
             stage = .venuePicker
         } else {
-            stage = .writeUp
+            stage = .saving
         }
     }
 
@@ -203,7 +173,7 @@ final class CaptureCoordinator {
         resolvedAddress = venue.address ?? described.address
     }
 
-    /// User picked a venue in the venue picker sheet; update the draft and advance.
+    /// User picked a venue in the venue picker; update the draft and save.
     func applyVenue(_ venue: VenueCandidate?) {
         chosenVenue = venue
         if let venue {
@@ -211,7 +181,7 @@ final class CaptureCoordinator {
             resolvedAddress = venue.address ?? resolvedAddress
             draftCategory = venue.category
         }
-        stage = .writeUp
+        stage = .saving
     }
 
     /// Commit the current draft to SwiftData through the repository and dismiss the flow.
@@ -236,12 +206,9 @@ final class CaptureCoordinator {
             repository.appendVisitOccasion(
                 to: existingVisit,
                 photos: photoRows,
-                transcript: transcript,
-                description: draftDescription,
+                note: note,
                 tags: draftTags,
-                topQuote: draftTopQuote,
                 rating: draftRating,
-                returnIntent: draftReturnIntent,
                 visitedOn: visitedOn,
                 tagged: taggedPeople
             )
@@ -263,11 +230,8 @@ final class CaptureCoordinator {
             visitedOn: visitedOn,
             title: draftTitle,
             tags: draftTags,
-            enrichedDescription: draftDescription,
-            transcript: transcript,
-            topQuote: draftTopQuote,
+            note: note,
             rating: draftRating,
-            returnIntent: draftReturnIntent,
             address: resolvedAddress ?? (addressInput.isEmpty ? nil : addressInput),
             nameOverride: nameInput.isEmpty ? nil : nameInput,
             locationSource: resolvedLocationSource,
@@ -293,12 +257,4 @@ final class CaptureCoordinator {
 
 private extension String {
     var nonEmpty: String? { isEmpty ? nil : self }
-    var isEmptyNil: String? { isEmpty ? nil : self }
-}
-
-private extension Optional where Wrapped == String {
-    var isEmptyNil: String? {
-        guard let self, !self.isEmpty else { return nil }
-        return self
-    }
 }

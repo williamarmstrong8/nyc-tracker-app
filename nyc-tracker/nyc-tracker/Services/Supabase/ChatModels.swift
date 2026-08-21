@@ -12,6 +12,13 @@ import Foundation
 // it reaches the other person, so there is nothing to protect by queueing it,
 // and a "sent" bubble that is actually sitting in a local table is a lie the
 // user will act on.
+//
+// That rule is about OUTGOING messages, and it still holds: nothing is ever
+// queued, and `ChatStore` only ever holds rows the server has already accepted.
+// Read history is a different question, and those same accepted rows are cached
+// to `Caches/` by `SnapshotStore` so reopening a thread shows the conversation
+// instead of a blank screen. Hence `Codable` here — the encode half is for that
+// cache and for nothing else.
 // ============================================================================
 
 // MARK: - conversation_threads
@@ -21,7 +28,7 @@ import Foundation
 ///
 /// Only threads that exist come back from the server, so the friends list treats
 /// a missing thread as "never messaged" rather than as an empty conversation.
-struct ConversationThread: Decodable, Identifiable, Hashable, Sendable {
+struct ConversationThread: Codable, Identifiable, Hashable, Sendable {
     let conversationID: UUID
 
     /// The OTHER participant. Never the caller — the server already resolved
@@ -100,6 +107,23 @@ struct ConversationThread: Decodable, Identifiable, Hashable, Sendable {
         // blank the friends page.
         unreadCount = try container.decodeIfPresent(Int.self, forKey: .unreadCount) ?? 0
     }
+
+    /// Written by hand because a custom `init(from:)` suppresses synthesised
+    /// `Encodable`. Only `SnapshotStore` encodes this.
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(conversationID, forKey: .conversationID)
+        try container.encode(userID, forKey: .userID)
+        try container.encodeIfPresent(username, forKey: .username)
+        try container.encodeIfPresent(displayName, forKey: .displayName)
+        try container.encodeIfPresent(avatarURL, forKey: .avatarURL)
+        try container.encodeIfPresent(createdAt, forKey: .createdAt)
+        try container.encodeIfPresent(lastMessageAt, forKey: .lastMessageAt)
+        try container.encodeIfPresent(lastMessageBody, forKey: .lastMessageBody)
+        try container.encodeIfPresent(lastMessageSenderID, forKey: .lastMessageSenderID)
+        try container.encodeIfPresent(lastMessagePlaceName, forKey: .lastMessagePlaceName)
+        try container.encode(unreadCount, forKey: .unreadCount)
+    }
 }
 
 // MARK: - message_details
@@ -109,7 +133,7 @@ struct ConversationThread: Decodable, Identifiable, Hashable, Sendable {
 /// `place` is optional because the column is: the schema allows a plain note
 /// even though today's composer never sends one. The card branches on it rather
 /// than assuming a venue is always there.
-struct ChatMessage: Decodable, Identifiable, Hashable, Sendable {
+struct ChatMessage: Codable, Identifiable, Hashable, Sendable {
     let id: UUID
     var conversationID: UUID
     var senderID: UUID
@@ -208,6 +232,41 @@ struct ChatMessage: Decodable, Identifiable, Hashable, Sendable {
         visitTags = try container.decodeIfPresent([String].self, forKey: .visitTags) ?? []
         ratingLabel = try container.decodeIfPresent(String.self, forKey: .ratingLabel)
         photos = try container.decodeIfPresent([FriendVisitPhoto].self, forKey: .photos) ?? []
+    }
+
+    /// Written by hand because `place` is flattened across seven keys, so there
+    /// is no property-to-key mapping for the compiler to synthesise from.
+    ///
+    /// Only `SnapshotStore` encodes this — `send_message` takes its own
+    /// parameter payload and nothing ever PUTs a message back. It is the exact
+    /// inverse of the decode above, including the rule that a message with no
+    /// venue writes no venue keys at all rather than a half-populated place.
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(conversationID, forKey: .conversationID)
+        try container.encode(senderID, forKey: .senderID)
+        try container.encode(body, forKey: .body)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encodeIfPresent(username, forKey: .username)
+        try container.encodeIfPresent(displayName, forKey: .displayName)
+        try container.encodeIfPresent(avatarURL, forKey: .avatarURL)
+
+        if let place {
+            try container.encode(place.id, forKey: .placeID)
+            try container.encode(place.name, forKey: .placeName)
+            try container.encodeIfPresent(place.categoryRaw, forKey: .placeCategory)
+            try container.encodeIfPresent(place.neighborhood, forKey: .neighborhood)
+            try container.encodeIfPresent(place.streetAddress, forKey: .streetAddress)
+            try container.encode(place.latitude, forKey: .latitude)
+            try container.encode(place.longitude, forKey: .longitude)
+        }
+
+        try container.encodeIfPresent(visitID, forKey: .visitID)
+        try container.encodeIfPresent(visitTitle, forKey: .visitTitle)
+        try container.encode(visitTags, forKey: .visitTags)
+        try container.encodeIfPresent(ratingLabel, forKey: .ratingLabel)
+        try container.encode(photos, forKey: .photos)
     }
 }
 

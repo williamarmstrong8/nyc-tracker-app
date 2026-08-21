@@ -47,11 +47,6 @@ enum FriendshipService {
     /// matches, and each row carries the caller's relationship to that person, so
     /// the list needs no follow-up query per row.
     static func search(_ query: String, limit: Int = 25) async throws -> [ProfileSearchResult] {
-        if let demo = SocialDemoMode.active {
-            await demo.simulateLatency()
-            return demo.search(query, limit: limit)
-        }
-
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         // The SQL already returns nothing for a blank term; short-circuiting here
         // saves the round trip on every keystroke that clears the field.
@@ -63,17 +58,23 @@ enum FriendshipService {
             .value
     }
 
+    /// Friends-of-friends the caller isn't already connected to, ranked by
+    /// shared friend count. Empty means there's genuinely nothing to
+    /// recommend, not a loading state — the server excludes zero-mutual
+    /// candidates rather than padding the list with strangers.
+    static func recommendedFriends(limit: Int = 10) async throws -> [RecommendedFriend] {
+        return try await client
+            .rpc("recommended_friends", params: ["p_limit": limit])
+            .execute()
+            .value
+    }
+
     // MARK: - Graph reads
 
     /// Every pending or accepted friendship the caller is party to.
     ///
     /// One call backs the friends list, both request queues, and the badge.
     static func edges() async throws -> [FriendshipEdge] {
-        if let demo = SocialDemoMode.active {
-            await demo.simulateLatency()
-            return demo.currentEdges()
-        }
-
         return try await client
             .rpc("friendship_edges")
             .execute()
@@ -83,11 +84,6 @@ enum FriendshipService {
     /// Public profile header + stats. `nil` means the account is gone, which is
     /// what a viewer sees when someone deletes their account mid-session.
     static func profile(of userID: UUID) async throws -> FriendProfileSummary? {
-        if let demo = SocialDemoMode.active {
-            await demo.simulateLatency()
-            return demo.profile(of: userID)
-        }
-
         let rows: [FriendProfileSummary] = try await client
             .rpc("friend_profile", params: ["p_user": userID.uuidString])
             .execute()
@@ -98,10 +94,6 @@ enum FriendshipService {
     /// Accepted-friend count for a public profile. Accepted rows are world-readable,
     /// so this is the same number anyone else would see — not "friends in common".
     static func acceptedFriendCount(of userID: UUID) async throws -> Int {
-        if let demo = SocialDemoMode.active {
-            return demo.acceptedFriendCount(of: userID)
-        }
-
         async let asRequester: [FriendshipIDRow] = client
             .from("friendships")
             .select("id")
@@ -132,11 +124,6 @@ enum FriendshipService {
     /// filter runs server-side and the rows decode into the same `FriendVisit`
     /// type the map and place sheet already use.
     static func visits(of userID: UUID, limit: Int = 100) async throws -> [FriendVisit] {
-        if let demo = SocialDemoMode.active {
-            await demo.simulateLatency()
-            return Array(demo.visits(of: userID).prefix(limit))
-        }
-
         return try await client
             .rpc("user_visits", params: UserVisitsParams(user: userID, limit: limit))
             .execute()
@@ -158,17 +145,6 @@ enum FriendshipService {
         userIDs: [UUID]?,
         limit: Int
     ) async throws -> [FriendVisit] {
-        if let demo = SocialDemoMode.active {
-            await demo.simulateLatency()
-            return Array(demo.visitsInBounds(
-                minLat: minLat,
-                maxLat: maxLat,
-                minLng: minLng,
-                maxLng: maxLng,
-                userIDs: userIDs
-            ).prefix(limit))
-        }
-
         let params = VisitsInBoundsParams(
             minLat: minLat,
             maxLat: maxLat,
@@ -194,12 +170,6 @@ enum FriendshipService {
     /// the difference from here, which is the point — refetching the edges is what
     /// reveals the outcome.
     static func sendRequest(to userID: UUID) async throws {
-        if let demo = SocialDemoMode.active {
-            await demo.simulateLatency()
-            demo.sendRequest(to: userID)
-            return
-        }
-
         try await client
             .rpc("send_friend_request", params: ["p_addressee": userID.uuidString])
             .execute()
@@ -217,12 +187,6 @@ enum FriendshipService {
     /// reports a zero-row UPDATE as success, and an accept blocked by RLS would
     /// look like it worked.
     static func accept(friendshipID: UUID) async throws {
-        if let demo = SocialDemoMode.active {
-            await demo.simulateLatency()
-            try demo.accept(friendshipID: friendshipID)
-            return
-        }
-
         let updated: [Friendship] = try await client
             .from("friendships")
             .update(["status": "accepted"])
@@ -242,12 +206,6 @@ enum FriendshipService {
     /// tombstoning — see the note at the foot of 20260816000200_social_graph.sql
     /// for why, and what would change if harassment became a concern.
     static func remove(friendshipID: UUID) async throws {
-        if let demo = SocialDemoMode.active {
-            await demo.simulateLatency()
-            demo.remove(friendshipID: friendshipID)
-            return
-        }
-
         try await client
             .from("friendships")
             .delete()
